@@ -1086,6 +1086,12 @@ class GuideController(NSObject):
         )
 
     def showPairTip_(self, name):
+        try:
+            NSApp.activateIgnoringOtherApps_(True)
+            if getattr(self, "window", None):
+                self.window.orderFrontRegardless()
+        except Exception:
+            pass
         show_pair_persist_tip(str(name) if name else "")
 
     def openStreamAfterLink_(self, name):
@@ -1304,6 +1310,12 @@ class AppDelegate(NSObject):
         threading.Thread(target=work, daemon=True).start()
 
     def showPairTip_(self, name):
+        try:
+            NSApp.activateIgnoringOtherApps_(True)
+            if getattr(self, "window", None):
+                self.window.orderFrontRegardless()
+        except Exception:
+            pass
         show_pair_persist_tip(str(name) if name else "")
 
     def connectWindows_(self, sender):
