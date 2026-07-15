@@ -67,44 +67,53 @@ def sh(cmd: str) -> str:
 
 
 def notify(title: str, message: str = ""):
+    """Deliver notification with Hermes_Pairing branding when possible."""
+    try:
+        from Foundation import NSUserNotification, NSUserNotificationCenter
+        n = NSUserNotification.alloc().init()
+        n.setTitle_(title)
+        if message:
+            n.setInformativeText_(message[:200])
+        # Prefer delivered as this process (Panel.app → Hermes_Pairing icon)
+        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(n)
+        return
+    except Exception as e:
+        log(f"NSUserNotification fail: {e}")
+    # Fallback: osascript (generic icon)
     safe_t = title.replace('"', "'")
     safe_m = message.replace('"', "'")[:200]
     sh(f'''osascript -e 'display notification "{safe_m}" with title "{safe_t}"' ''')
 
 
 def list_pairs() -> list[str]:
+    """All hermes pairing tmux sessions."""
     out = sh("tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
     names = []
     for s in out.splitlines():
         s = s.strip()
-        if any(s == p or s.startswith(p + "-") or s.startswith("hermes-pair") for p in SESSION_PREFIXES):
+        if not s:
+            continue
+        if (
+            s == "hermes-claude"
+            or s.startswith("hermes-claude-")
+            or s.startswith("hermes-pair")
+        ):
             names.append(s)
-        elif s.startswith("hermes-pair"):
-            names.append(s)
-    # de-dupe preserve order
-    seen = set()
-    out_list = []
-    for n in names:
-        if n not in seen:
-            seen.add(n)
-            out_list.append(n)
-    return out_list
+    log(f"list_pairs raw={out!r} filtered={names}")
+    return names
 
 
 def next_pair_name() -> str:
     existing = set(list_pairs())
-    if not existing:
+    if "hermes-claude" not in existing:
         return "hermes-claude"
     n = 1
-    while True:
+    while n <= 50:
         name = f"hermes-pair-{n}"
-        if name not in existing and not (n == 1 and "hermes-claude" in existing and name == "hermes-pair-1"):
-            # if hermes-claude exists, start at hermes-pair-1 etc.
-            if name not in existing:
-                return name
+        if name not in existing:
+            return name
         n += 1
-        if n > 50:
-            return f"hermes-pair-{int(time.time()) % 10000}"
+    return f"hermes-pair-{int(time.time()) % 10000}"
 
 
 def start_fresh(name: str | None = None):
@@ -115,6 +124,7 @@ def start_fresh(name: str | None = None):
     sh(f"tmux send-keys -t {name}:1 'cd ~ && claude' Enter")
     bring_to_front(name)
     notify("New pair", name)
+    log(f"start_fresh created {name}; now={list_pairs()}")
     return name
 
 
@@ -129,11 +139,27 @@ def bring_to_front(name: str):
 def kill_pair(name: str):
     sh(f"tmux kill-session -t {name} 2>/dev/null || true")
     notify("Killed", name)
+    log(f"killed {name}; now={list_pairs()}")
 
 
-def pick_window(prompt: str, label: str):
-    notify("Hermes_Pairing", prompt)
-    time.sleep(2.0)
+def _front_terminal_id() -> str | None:
+    """Return Terminal front window id, or None."""
+    script = '''
+    tell application "Terminal"
+        try
+            if (count of windows) is 0 then return "NONE"
+            return id of front window as string
+        on error
+            return "NONE"
+        end try
+    end tell
+    '''
+    r = sh(f"osascript -e {repr(script)}").strip()
+    return r if r.isdigit() else None
+
+
+def _window_under_mouse() -> str | None:
+    """Best-effort: Terminal window under cursor (needs Accessibility)."""
     script = '''
     tell application "System Events"
         set mousePos to current position of mouse
@@ -142,9 +168,16 @@ def pick_window(prompt: str, label: str):
         tell process "Terminal"
             repeat with w in windows
                 try
-                    set {x, y, wW, wH} to position of w & size of w
+                    set pos to position of w
+                    set sz to size of w
+                    set x to item 1 of pos
+                    set y to item 2 of pos
+                    set wW to item 1 of sz
+                    set wH to item 2 of sz
                     if mouseX ≥ x and mouseX ≤ (x + wW) and mouseY ≥ y and mouseY ≤ (y + wH) then
-                        return id of w as string
+                        -- map AX window to Terminal id via index is hard; use title match later
+                        set t to name of w
+                        return t
                     end if
                 end try
             end repeat
@@ -152,47 +185,83 @@ def pick_window(prompt: str, label: str):
     end tell
     return "NONE"
     '''
-    result = sh(f"osascript -e {repr(script)}")
-    if "NONE" in result or not result.isdigit():
-        result = sh(
-            '''osascript -e 'tell application "Terminal"
-            try
-                return id of front window as string
-            end try
-        end tell' '''
-        )
-    win_id = result.strip()
-    if not win_id.isdigit():
-        notify("No window", "Hover a Terminal window and try again")
-        return None
-    sh(
-        f'''osascript -e 'tell application "Terminal" to set custom title of window id {win_id} to "● {label}"' '''
-    )
-    notify(f"{label} selected", "")
-    time.sleep(1.0)
-    return win_id
+    # Prefer Terminal's own id of front window after user clicks (most reliable)
+    return None
+
+
+def pick_window(prompt: str, label: str, exclude_id: str | None = None) -> str | None:
+    """
+    Click-to-select: click a Terminal window and hold it frontmost ~1s.
+    exclude_id avoids re-selecting the first window for the second pick.
+    """
+    notify("Hermes_Pairing", prompt + " — click it and keep it front for 1s")
+    log(f"pick_window start label={label} exclude={exclude_id}")
+
+    deadline = time.time() + 12.0
+    last = None
+    stable = 0
+
+    while time.time() < deadline:
+        wid = _front_terminal_id()
+        if wid and wid != exclude_id:
+            if wid == last:
+                stable += 1
+                if stable >= 4:  # ~1s at 0.25s poll
+                    # tag window
+                    sh(
+                        f'''osascript -e 'tell application "Terminal" to try
+                        set custom title of window id {wid} to "● {label}"
+                    end try' '''
+                    )
+                    notify(f"{label} selected", f"Window {wid}")
+                    log(f"pick_window ok label={label} id={wid}")
+                    time.sleep(0.4)
+                    return wid
+            else:
+                last = wid
+                stable = 1
+        else:
+            # waiting for a different front window
+            if wid == exclude_id:
+                stable = 0
+                last = None
+        time.sleep(0.25)
+
+    notify("Timed out", f"Click a Terminal for {label} and keep it front")
+    log(f"pick_window timeout label={label}")
+    return None
 
 
 def connect_windows():
     name = next_pair_name()
-    w1 = pick_window("Hover the Hermes Terminal for 2s", "HERMES")
+    notify("Link Terminals", "1/2 — click HERMES Terminal, keep it front")
+    w1 = pick_window("HERMES Terminal", "HERMES", exclude_id=None)
     if not w1:
         return
-    w2 = pick_window("Hover the Claude Terminal for 2s", "CLAUDE")
+    notify("Link Terminals", "2/2 — click CLAUDE Terminal (different window)")
+    w2 = pick_window("CLAUDE Terminal", "CLAUDE", exclude_id=w1)
     if not w2:
         return
     if w1 == w2:
-        notify("Same window", "Pick two different Terminals")
+        notify("Same window", "Need two different Terminal windows")
+        log(f"connect_windows same id {w1}")
         return
+
+    # Create detached session then attach each window as a client view
+    sh(f"tmux new-session -d -s {name} -n Hermes 2>/dev/null || true")
+    sh(f"tmux new-window -t {name}:1 -n Claude 2>/dev/null || true")
     sh(
-        f'''osascript -e 'tell application "Terminal" to do script "clear; echo HERMES; tmux new-session -d -s {name} 2>/dev/null || true; tmux attach -t {name}" in window id {w1}' '''
+        f'''osascript -e 'tell application "Terminal" to do script "tmux attach -t {name}:0" in window id {w1}' '''
     )
-    time.sleep(1.2)
+    time.sleep(0.8)
     sh(
-        f'''osascript -e 'tell application "Terminal" to do script "clear; echo CLAUDE; tmux new-window -t {name}:1 -n Claude 2>/dev/null || true; tmux send-keys -t {name}:1 \\"cd ~ && claude\\" Enter" in window id {w2}' '''
+        f'''osascript -e 'tell application "Terminal" to do script "tmux attach -t {name}:1 || tmux new-window -t {name}:1 -n Claude; tmux attach -t {name}:1" in window id {w2}' '''
     )
+    time.sleep(0.5)
+    sh(f"tmux send-keys -t {name}:1 'cd ~ && claude' Enter")
     sh('''osascript -e 'tell application "Terminal" to activate' ''')
     notify("Linked", name)
+    log(f"connect_windows linked {name} w1={w1} w2={w2} sessions={list_pairs()}")
 
 
 def lbl(text, frame, bold=False, size=13.0, secondary=False):
