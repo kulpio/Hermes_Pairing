@@ -76,6 +76,78 @@ def sh(cmd: str) -> str:
         return str(e)
 
 
+def osascript(script: str) -> str:
+    """Run multi-line AppleScript via temp file (reliable)."""
+    import tempfile
+    import os
+
+    path = None
+    try:
+        f = tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False)
+        f.write(script)
+        f.close()
+        path = f.name
+        r = subprocess.run(["osascript", path], capture_output=True, text=True)
+        return (r.stdout or "").strip()
+    except Exception as e:
+        log(f"osascript err: {e}")
+        return ""
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+
+def list_terminal_windows() -> list[tuple[str, str]]:
+    """Return [(window_id, title), ...] for all Terminal windows."""
+    script = '''
+tell application "Terminal"
+  set acc to ""
+  repeat with w in windows
+    try
+      set wid to id of w as string
+      set nm to name of w
+      set acc to acc & wid & "|||" & nm & linefeed
+    end try
+  end repeat
+  return acc
+end tell
+'''
+    out = osascript(script)
+    rows = []
+    for line in out.splitlines():
+        line = line.strip()
+        if "|||" not in line:
+            continue
+        wid, title = line.split("|||", 1)
+        wid = wid.strip()
+        if wid.isdigit():
+            # Shorten title for button
+            t = title.strip()
+            if len(t) > 42:
+                t = t[:39] + "…"
+            rows.append((wid, t))
+    log(f"list_terminal_windows n={len(rows)} {rows}")
+    return rows
+
+
+def _front_terminal_id() -> str | None:
+    script = '''
+tell application "Terminal"
+  try
+    if (count of windows) is 0 then return "NONE"
+    return id of front window as string
+  on error
+    return "NONE"
+  end try
+end tell
+'''
+    r = osascript(script)
+    return r if r.isdigit() else None
+
+
 def list_pairs() -> list[str]:
     out = sh("tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
     names = []
@@ -123,21 +195,6 @@ def bring_to_front(name: str):
 def kill_pair(name: str):
     sh(f"tmux kill-session -t {name} 2>/dev/null || true")
     log(f"killed {name}")
-
-
-def _front_terminal_id() -> str | None:
-    script = '''
-    tell application "Terminal"
-        try
-            if (count of windows) is 0 then return "NONE"
-            return id of front window as string
-        on error
-            return "NONE"
-        end try
-    end tell
-    '''
-    r = sh(f"osascript -e {repr(script)}").strip()
-    return r if r.isdigit() else None
 
 
 def _mouse_down() -> bool:
@@ -298,48 +355,54 @@ def btn(title, action, frame, target):
 
 class GuideController(NSObject):
     """
-    Floating guide for linking Terminals.
-    Primary: big "Use this Terminal" button (always works).
-    Secondary: auto-detect when front Terminal window changes after guide opens.
+    Pick Terminals by listing them as buttons (by window id).
+    No mouse-click detection — always works.
     """
 
     window = None
     titleLabel = None
-    bodyLabel = None
     stepLabel = None
-    useBtn = None
+    listView = None
     cancelBtn = None
-    timer = None
-    phase = None  # "hermes" | "claude" | None
+    refreshBtn = None
+    phase = None  # hermes | claude | None
     hermes_id = None
     pair_name = None
     parent = None
-    started = 0.0
-    baseline_id = None
-    stable_id = None
-    stable_count = 0
-    monitor = None
+    win_buttons = None
 
-    def showGuide_body_step_(self, title, body, step):
-        if self.window is None:
-            self._make()
-        self.titleLabel.setStringValue_(title)
-        self.bodyLabel.setStringValue_(body)
-        self.stepLabel.setStringValue_(step)
-        # Keep guide visible but do NOT steal focus from Terminal (critical for click flow)
-        self.window.orderFrontRegardless()
-        log(f"guide: {title} | {body}")
+    GW = 420
+    GH = 360
 
-    def _make(self):
-        # Taller for the primary button
-        gw, gh = 360, 200
+    def startLinkWithParent_(self, parent):
+        self.parent = parent
+        clear_overlays()
+        self.phase = "hermes"
+        self.hermes_id = None
+        self.pair_name = next_pair_name()
+        self.win_buttons = []
+        log(f"startLink list-picker pair={self.pair_name}")
+        self._ensure_window()
+        self._show_step(
+            "Step 1 of 2 — HERMES",
+            "Pick the Terminal that should be Hermes:",
+        )
+        self._rebuild_window_list()
+        self.window.center()
+        self.window.makeKeyAndOrderFront_(None)
+        NSApp.activateIgnoringOtherApps_(True)
+
+    def _ensure_window(self):
+        if self.window is not None:
+            return
+        gw, gh = self.GW, self.GH
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, gw, gh),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
             NSBackingStoreBuffered,
             False,
         )
-        self.window.setTitle_("Hermes Pong")
+        self.window.setTitle_("Hermes Pong — Link")
         self.window.setLevel_(NSStatusWindowLevel + 1)
         self.window.setReleasedWhenClosed_(False)
         try:
@@ -349,145 +412,109 @@ class GuideController(NSObject):
         except Exception:
             pass
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, gw, gh))
-        self.stepLabel = lbl("Step 1 of 2", NSMakeRect(16, gh - 36, gw - 32, 18), size=11, secondary=True)
-        self.titleLabel = lbl("Pick HERMES Terminal", NSMakeRect(16, gh - 64, gw - 32, 24), bold=True, size=16)
-        self.bodyLabel = lbl(
-            "1) Click the Terminal window\n2) Click “Use this Terminal” below",
-            NSMakeRect(16, 70, gw - 32, 50),
-            size=12,
-            secondary=True,
+        self.stepLabel = lbl(
+            "Step 1 of 2", NSMakeRect(16, gh - 36, gw - 32, 18), size=11, secondary=True
         )
-        self.useBtn = btn("Use this Terminal", "useFront:", NSMakeRect(16, 16, 200, 36), self)
-        self.cancelBtn = btn("Cancel", "cancelLink:", NSMakeRect(gw - 100, 16, 84, 36), self)
+        self.titleLabel = lbl(
+            "Pick HERMES Terminal", NSMakeRect(16, gh - 64, gw - 32, 24), bold=True, size=15
+        )
+        self.listView = NSView.alloc().initWithFrame_(NSMakeRect(16, 56, gw - 32, gh - 140))
+        self.refreshBtn = btn("Refresh list", "refreshList:", NSMakeRect(16, 14, 120, 32), self)
+        self.cancelBtn = btn("Cancel", "cancelLink:", NSMakeRect(gw - 100, 14, 84, 32), self)
         content.addSubview_(self.stepLabel)
         content.addSubview_(self.titleLabel)
-        content.addSubview_(self.bodyLabel)
-        content.addSubview_(self.useBtn)
+        content.addSubview_(self.listView)
+        content.addSubview_(self.refreshBtn)
         content.addSubview_(self.cancelBtn)
         self.window.setContentView_(content)
-        self.window.center()
 
-    def startLinkWithParent_(self, parent):
-        self.parent = parent
-        clear_overlays()
-        self.phase = "hermes"
-        self.hermes_id = None
-        self.pair_name = next_pair_name()
-        self.started = time.time()
-        self.baseline_id = _front_terminal_id()
-        self.stable_id = None
-        self.stable_count = 0
-        log(f"startLink baseline_front={self.baseline_id} pair={self.pair_name}")
-        self.showGuide_body_step_(
-            "Pick HERMES Terminal",
-            "1) Click the Hermes Terminal window\n2) Press “Use this Terminal”\n(Or just click it — auto-detects if the front window changes.)",
-            "Step 1 of 2",
-        )
-        self._install_click_monitor()
-        self._arm_timer()
+    def _show_step(self, step, title):
+        if self.stepLabel:
+            self.stepLabel.setStringValue_(step)
+        if self.titleLabel:
+            self.titleLabel.setStringValue_(title)
+        log(f"guide step={step} title={title}")
 
-    def _install_click_monitor(self):
-        """Global left-click monitor (needs Accessibility; best-effort)."""
-        self._remove_click_monitor()
-        try:
-            from AppKit import NSEvent, NSEventMaskLeftMouseDown
+    def refreshList_(self, sender):
+        self._rebuild_window_list()
 
-            def handler(event):
-                # Defer slightly so Terminal can become front after the click
-                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                    0.08, self, "afterClick:", None, False
+    def _rebuild_window_list(self):
+        if self.listView is None:
+            return
+        for sub in list(self.listView.subviews()):
+            sub.removeFromSuperview()
+        self.win_buttons = []
+        wins = list_terminal_windows()
+        if not wins:
+            self.listView.addSubview_(
+                lbl(
+                    "No Terminal windows found. Open two Terminals, then Refresh list.",
+                    NSMakeRect(0, 120, self.GW - 32, 60),
+                    size=12,
+                    secondary=True,
                 )
-
-            mon = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                NSEventMaskLeftMouseDown, handler
             )
-            self.monitor = mon
-            log(f"global click monitor installed mon={mon is not None}")
-            if mon is None:
-                log("global monitor None — grant Accessibility to Hermes Pong / Python for auto-click")
-        except Exception as e:
-            log(f"click monitor fail: {e}")
-            self.monitor = None
-
-    def _remove_click_monitor(self):
-        if self.monitor is not None:
-            try:
-                from AppKit import NSEvent
-                NSEvent.removeMonitor_(self.monitor)
-            except Exception:
-                pass
-            self.monitor = None
-
-    def afterClick_(self, timer):
-        if self.phase not in ("hermes", "claude"):
             return
-        wid = _front_terminal_id()
-        log(f"afterClick front={wid} phase={self.phase} hermes={self.hermes_id}")
-        if not wid:
-            return
-        # Only auto-accept if front changed from baseline (or from hermes on step 2)
-        if self.phase == "hermes":
-            if wid != self.baseline_id or self.baseline_id is None:
-                self._accept_window(wid)
-        elif self.phase == "claude":
-            if wid != self.hermes_id:
-                self._accept_window(wid)
+        y = self.GH - 160
+        for wid, title in wins:
+            if self.phase == "claude" and wid == self.hermes_id:
+                label = f"✓ HERMES  {title}"
+                row = lbl(label, NSMakeRect(0, y, self.GW - 32, 28), size=11, secondary=True)
+                self.listView.addSubview_(row)
+            else:
+                b = btn(f"→  {title}", "pickWindow:", NSMakeRect(0, y, self.GW - 32, 32), self)
+                b.setIdentifier_(wid)
+                self.listView.addSubview_(b)
+                self.win_buttons.append(b)
+            y -= 40
+            if y < 0:
+                break
 
-    def useFront_(self, sender):
-        """Primary: user confirms current front Terminal."""
-        wid = _front_terminal_id()
-        log(f"useFront clicked front={wid} phase={self.phase}")
-        if not wid:
-            self.showGuide_body_step_(
-                "No Terminal front",
-                "Click a Terminal window first, then press “Use this Terminal” again.",
-                self.stepLabel.stringValue() if self.stepLabel else "—",
-            )
+    def pickWindow_(self, sender):
+        wid = str(sender.identifier()) if sender.identifier() else ""
+        log(f"pickWindow id={wid} phase={self.phase}")
+        if not wid.isdigit():
             return
         self._accept_window(wid)
 
     def _accept_window(self, wid: str):
         if self.phase == "hermes":
             self.hermes_id = wid
-            sh(
-                f'''osascript -e 'tell application "Terminal" to try
-                set custom title of window id {wid} to "● HERMES"
-            end try' '''
+            osascript(
+                "tell application \"Terminal\"\n"
+                "  try\n"
+                f"    set custom title of window id {wid} to \"● HERMES\"\n"
+                f"    set index of window id {wid} to 1\n"
+                "    activate\n"
+                "  end try\n"
+                "end tell\n"
             )
             show_window_overlay("HERMES", HERMES_BLUE)
             self.phase = "claude"
-            self.started = time.time()
-            self.baseline_id = wid  # next pick must differ
-            self.stable_id = None
-            self.stable_count = 0
-            self.showGuide_body_step_(
-                "Pick CLAUDE Terminal",
-                "1) Click the other Terminal (Claude)\n2) Press “Use this Terminal”\nBlue was Hermes — need a different window.",
-                "Step 2 of 2",
+            self._show_step(
+                "Step 2 of 2 — CLAUDE",
+                "Pick the OTHER Terminal for Claude:",
             )
+            self._rebuild_window_list()
             log(f"accepted HERMES id={wid}")
         elif self.phase == "claude":
             if wid == self.hermes_id:
-                self.showGuide_body_step_(
-                    "Same window",
-                    "That’s the Hermes window. Click the OTHER Terminal, then “Use this Terminal”.",
-                    "Step 2 of 2",
-                )
+                self._show_step("Same window", "Pick a different Terminal for Claude.")
                 return
-            sh(
-                f'''osascript -e 'tell application "Terminal" to try
-                set custom title of window id {wid} to "● CLAUDE"
-            end try' '''
+            osascript(
+                "tell application \"Terminal\"\n"
+                "  try\n"
+                f"    set custom title of window id {wid} to \"● CLAUDE\"\n"
+                f"    set index of window id {wid} to 1\n"
+                "    activate\n"
+                "  end try\n"
+                "end tell\n"
             )
             show_window_overlay("CLAUDE", CLAUDE_ORANGE)
             self.phase = "wiring"
-            self.showGuide_body_step_(
-                "Linking…",
-                f"Wiring pair “{self.pair_name}”. One moment.",
-                "Almost done",
-            )
-            self._stop_timer()
-            self._remove_click_monitor()
+            self._show_step("Linking…", f"Wiring “{self.pair_name}”…")
+            for sub in list(self.listView.subviews()):
+                sub.removeFromSuperview()
             hid, cid, name = self.hermes_id, wid, self.pair_name
             log(f"accepted CLAUDE id={wid}; wiring {name}")
 
@@ -501,62 +528,8 @@ class GuideController(NSObject):
 
             threading.Thread(target=work, daemon=True).start()
 
-    def _arm_timer(self):
-        if self.timer:
-            try:
-                self.timer.invalidate()
-            except Exception:
-                pass
-        # Front-window change detector (backup if global monitor blocked)
-        self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            0.15, self, "tick:", None, True
-        )
-
-    def tick_(self, timer):
-        if self.phase not in ("hermes", "claude"):
-            return
-        if time.time() - self.started > 45:
-            self.showGuide_body_step_(
-                "Timed out",
-                "No pick. Click a Terminal, then “Use this Terminal”.",
-                "—",
-            )
-            self._stop_timer()
-            self.phase = None
-            return
-
-        # Ignore first 0.4s so opening the guide doesn't auto-grab current front
-        if time.time() - self.started < 0.4:
-            return
-
-        wid = _front_terminal_id()
-        if not wid:
-            return
-
-        # Require front to change from baseline and stay stable briefly
-        if self.phase == "hermes":
-            if wid == self.baseline_id:
-                self.stable_count = 0
-                self.stable_id = None
-                return
-        if self.phase == "claude":
-            if wid == self.hermes_id:
-                self.stable_count = 0
-                self.stable_id = None
-                return
-
-        if wid == self.stable_id:
-            self.stable_count += 1
-            # ~0.45s stable front after change → auto accept
-            if self.stable_count >= 3:
-                log(f"auto-accept via front change id={wid}")
-                self._accept_window(wid)
-        else:
-            self.stable_id = wid
-            self.stable_count = 1
-
     def finishOk_(self, name):
-        self.showGuide_body_step_("Linked", f"Pair “{name}” is ready.", "Done")
+        self._show_step("Linked", f"Pair “{name}” is ready.")
         if self.parent:
             self.parent.refreshUI_(None)
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -568,27 +541,14 @@ class GuideController(NSObject):
         clear_overlays()
 
     def cancelLink_(self, sender):
-        self._stop_timer()
-        self._remove_click_monitor()
         self.phase = None
         clear_overlays()
         self.closeGuide()
 
     def closeGuide(self):
-        self._stop_timer()
-        self._remove_click_monitor()
         self.phase = None
         if self.window:
             self.window.orderOut_(None)
-
-    def _stop_timer(self):
-        if self.timer:
-            try:
-                self.timer.invalidate()
-            except Exception:
-                pass
-            self.timer = None
-
 
 class AppDelegate(NSObject):
     window = None
@@ -704,7 +664,7 @@ class AppDelegate(NSObject):
         y -= 24
         content.addSubview_(
             lbl(
-                "Opens a guide popup — click each Terminal (not hover).",
+                "Opens a window list — tap each Terminal in the guide.",
                 NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 20),
                 size=12,
                 secondary=True,
