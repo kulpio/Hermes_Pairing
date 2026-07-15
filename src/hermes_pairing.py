@@ -5,6 +5,7 @@ Hermes Pong control panel — multi-pair list, click-to-link with guide popup.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -471,7 +472,9 @@ def wire_pair(name: str, w1: str, w2: str):
     if claude_tui:
         log(f"Claude window {w2} is live TUI — register only (no chat junk)")
         save_pair_state(name, hermes_window_id=w1, claude_window_id=w2, claude_mode="window")
-        log(f"wired {name} mode=window hermes={w1} claude={w2}")
+        # Hermes still often types into tmux :1 — relay mirrors that into this Claude window
+        start_window_relay()
+        log(f"wired {name} mode=window hermes={w1} claude={w2} (+relay)")
         return
 
     # Claude shell → attach :1 and run claude so work is visible in that window
@@ -493,6 +496,48 @@ def wire_pair(name: str, w1: str, w2: str):
     log(f"wired {name} mode=tmux hermes={w1} claude={w2}")
 
 
+def start_window_relay() -> None:
+    """Background relay: tmux :1 → live Claude Code window (Link existing)."""
+    stop_window_relay()
+    script = Path.home() / "bin" / "claude-window-relay.py"
+    if not script.exists():
+        alt = Path("/Users/dylandemnard/DigitalBrain/Boreal/tools/hermes-claude-app/scripts/claude-window-relay.py")
+        script = alt if alt.exists() else script
+    if not script.exists():
+        log("relay script missing")
+        return
+    py = Path("/Users/dylandemnard/DigitalBrain/Boreal/tools/hermes-claude-app/venv/bin/python")
+    if not py.exists():
+        py = Path("/usr/bin/python3")
+    try:
+        p = subprocess.Popen(
+            [str(py), str(script)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        (Path.home() / ".hermes-pong" / "relay.pid").write_text(str(p.pid))
+        log(f"window relay started pid={p.pid}")
+    except Exception as e:
+        log(f"relay start fail: {e}")
+
+
+def stop_window_relay() -> None:
+    pid_path = Path.home() / ".hermes-pong" / "relay.pid"
+    if not pid_path.exists():
+        return
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 15)
+        log(f"relay stopped pid={pid}")
+    except Exception:
+        pass
+    try:
+        pid_path.unlink()
+    except Exception:
+        pass
+
+
 def kill_pair(name: str):
     for s in (name, f"{name}-h", f"{name}-c"):
         sh(f"tmux kill-session -t {s} 2>/dev/null || true")
@@ -502,6 +547,16 @@ def kill_pair(name: str):
         if name in db:
             del db[name]
             (Path.home() / ".hermes-pong" / "pairs.json").write_text(json.dumps(db, indent=2))
+    except Exception:
+        pass
+    # If no remaining window-mode pairs, stop relay
+    try:
+        import json
+        ap = Path.home() / ".hermes-pong" / "active-pair.json"
+        if ap.exists():
+            cur = json.loads(ap.read_text())
+            if cur.get("session") == name:
+                stop_window_relay()
     except Exception:
         pass
     log(f"killed {name} (+ views)")

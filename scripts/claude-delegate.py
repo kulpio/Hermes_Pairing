@@ -3,11 +3,11 @@
 claude-delegate.py — send a task to the Claude side of a Hermes Pong pair.
 
 Two modes:
-  tmux   — Claude runs inside tmux (capture-pane works; Hermes can "see" output)
-  window — Claude is a live Terminal window; we clipboard-paste + press Return
+  tmux   — Claude runs inside tmux (New pair): paste into session:1
+  window — Claude is a live Terminal (Link existing): clipboard paste + Return
+           into that window; also writes last-sent for the relay.
 
-Always submits with Enter/Return (no silent text sitting in the input box).
-Writes the last captured reply to ~/.hermes-pong/last-claude.txt for Hermes.
+Always submits with Enter (no silent text sitting in the box).
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ MARKER = "##CLAUDE_DONE##"
 STATE_DIR = Path.home() / ".hermes-pong"
 STATE_FILE = STATE_DIR / "active-pair.json"
 LAST_REPLY = STATE_DIR / "last-claude.txt"
+LAST_SENT = STATE_DIR / "last-sent.txt"
 
 
 def run(cmd: list[str], input_text: str | None = None) -> str:
@@ -33,21 +34,6 @@ def run(cmd: list[str], input_text: str | None = None) -> str:
 def run_ok(cmd: list[str], input_text: str | None = None) -> bool:
     r = subprocess.run(cmd, input=input_text, capture_output=True, text=True)
     return r.returncode == 0
-
-
-def osascript(script: str) -> str:
-    r = subprocess.run(["osascript", "-e", script] if "\n" not in script else ["osascript"], 
-                       input=script if "\n" in script else None,
-                       capture_output=True, text=True)
-    # multi-line via temp for reliability
-    if "\n" in script:
-        import tempfile, os
-        f = tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False)
-        f.write(script)
-        f.close()
-        r = subprocess.run(["osascript", f.name], capture_output=True, text=True)
-        os.unlink(f.name)
-    return (r.stdout or "").strip()
 
 
 def load_state() -> dict:
@@ -64,6 +50,8 @@ def list_pair_sessions() -> list[str]:
     names = []
     for line in out.splitlines():
         s = line.strip()
+        if s.endswith("-h") or s.endswith("-c"):
+            continue
         if s == "hermes-claude" or s.startswith("hermes-claude-") or s.startswith("hermes-pair"):
             names.append(s)
     return names
@@ -93,7 +81,6 @@ def capture_tmux(target: str, lines: int = 400) -> str:
 def save_reply(text: str) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LAST_REPLY.write_text(text)
-    # Also dump into Hermes pane if known
     state = load_state()
     sess = state.get("session")
     if sess:
@@ -107,9 +94,39 @@ def save_reply(text: str) -> None:
         run_ok(["tmux", "paste-buffer", "-t", f"{sess}:0", "-d"])
 
 
+def quartz_paste_enter() -> bool:
+    try:
+        from Quartz import (
+            CGEventCreateKeyboardEvent,
+            CGEventPost,
+            CGEventSetFlags,
+            kCGHIDEventTap,
+            kCGEventFlagMaskCommand,
+        )
+
+        def tap(key_code: int, flags: int = 0, down: bool = True):
+            ev = CGEventCreateKeyboardEvent(None, key_code, down)
+            if flags:
+                CGEventSetFlags(ev, flags)
+            CGEventPost(kCGHIDEventTap, ev)
+
+        tap(9, kCGEventFlagMaskCommand, True)
+        tap(9, kCGEventFlagMaskCommand, False)
+        time.sleep(0.2)
+        tap(36, 0, True)
+        tap(36, 0, False)
+        time.sleep(0.05)
+        tap(36, 0, True)
+        tap(36, 0, False)
+        return True
+    except Exception as e:
+        print(f"[bridge] quartz paste failed: {e}", file=sys.stderr)
+        return False
+
+
 def send_via_tmux(target: str, prompt: str) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    (STATE_DIR / "last-sent.txt").write_text(prompt)
+    LAST_SENT.write_text(prompt)
 
     run_ok(["tmux", "select-window", "-t", target])
     flash_tmux(target, "⚡ Hermes Pong: submitting task (paste + Enter)…")
@@ -128,7 +145,6 @@ def send_via_tmux(target: str, prompt: str) -> None:
     run_ok(["tmux", "send-keys", "-t", target, "C-m"])
     flash_tmux(target, "⚡ Hermes Pong: Enter sent — watch Claude window")
     print(f"[bridge] tmux submit → {target} ({len(prompt)} chars) + Enter")
-    # Nudge Claude view session so the Claude Terminal is on window 1
     state = load_state()
     vc = state.get("view_claude")
     if vc:
@@ -138,15 +154,14 @@ def send_via_tmux(target: str, prompt: str) -> None:
 def send_via_terminal_window(window_id: str, prompt: str) -> None:
     """Clipboard paste + Return into the live Claude Terminal window."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    (STATE_DIR / "last-sent.txt").write_text(prompt)
+    LAST_SENT.write_text(prompt)
 
     p = subprocess.run(["pbcopy"], input=prompt, text=True)
     if p.returncode != 0:
         print("[bridge] pbcopy failed", file=sys.stderr)
         sys.exit(1)
 
-    # Robust: focus window, paste, Return. Needs Accessibility for System Events.
-    script = f'''
+    focus = f'''
 tell application "Terminal"
   try
     set w to window id {window_id}
@@ -155,37 +170,45 @@ tell application "Terminal"
     activate
   end try
 end tell
-delay 0.35
+'''
+    subprocess.run(["osascript"], input=focus, text=True, capture_output=True)
+    time.sleep(0.4)
+
+    if quartz_paste_enter():
+        print(f"[bridge] → Claude window {window_id} quartz paste+Enter ({len(prompt)} chars)")
+    else:
+        script = f'''
 tell application "System Events"
   tell process "Terminal"
     set frontmost to true
-    delay 0.1
+    delay 0.15
     keystroke "v" using {{command down}}
     delay 0.25
     key code 36
+    delay 0.05
+    key code 36
   end tell
 end tell
-return "OK"
 '''
-    import tempfile, os
-    f = tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False)
-    f.write(script)
-    f.close()
-    r = subprocess.run(["osascript", f.name], capture_output=True, text=True)
-    os.unlink(f.name)
-    print(
-        f"[bridge] → Claude Terminal id={window_id} "
-        f"paste+Return ({len(prompt)} chars) result={r.stdout.strip()!r}"
-    )
-    if r.returncode != 0:
-        print(r.stderr, file=sys.stderr)
-        print(
-            "[bridge] If paste failed: System Settings → Privacy → Accessibility — allow Terminal/osascript",
-            file=sys.stderr,
-        )
-    # Also log for Hermes
-    print(f"[bridge] prompt saved: {STATE_DIR / 'last-sent.txt'}")
-    print("[bridge] Look at the Claude window — the task should appear and submit.")
+        r = subprocess.run(["osascript"], input=script, text=True, capture_output=True)
+        print(f"[bridge] → Claude window {window_id} osascript paste rc={r.returncode}")
+        if r.returncode != 0:
+            print(r.stderr, file=sys.stderr)
+            print(
+                "[bridge] Enable Accessibility for Terminal/osascript if paste fails",
+                file=sys.stderr,
+            )
+
+    # Also dump into tmux :1 so the relay/log has a copy
+    state = load_state()
+    sess = state.get("session")
+    if sess:
+        run_ok(["tmux", "load-buffer", "-"], input_text=prompt)
+        run_ok(["tmux", "paste-buffer", "-t", f"{sess}:1", "-d"])
+        run_ok(["tmux", "send-keys", "-t", f"{sess}:1", "Enter"])
+
+    print(f"[bridge] saved {LAST_SENT}")
+    print("[bridge] Watch your Claude Code window — task should appear and submit.")
 
 
 def wait_tmux(target: str, max_wait: int = 600, poll: float = 3.0) -> str:
@@ -214,14 +237,6 @@ def wait_tmux(target: str, max_wait: int = 600, poll: float = 3.0) -> str:
         now = time.time()
         if now - last_flash > 15:
             flash_tmux(target, f"⚡ Hermes Pong: Claude working… {int(now - start)}s")
-            # Mirror a live tail to Hermes so you see what Claude is doing
-            state = load_state()
-            sess = state.get("session")
-            if sess:
-                tail = "\n".join(out.split("\n")[-12:])
-                run_ok(
-                    ["tmux", "display-message", "-t", f"{sess}:0", f"Claude tail: {tail[-80:]}"]
-                )
             last_flash = now
         time.sleep(poll)
     flash_tmux(target, "⚡ Hermes Pong: timeout")
@@ -234,7 +249,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("prompt", nargs="*")
     ap.add_argument("-s", "--session", default=None)
-    ap.add_argument("-w", "--window", default="1", help="tmux Claude window index")
+    ap.add_argument("-w", "--window", default="1")
     ap.add_argument("--no-wait", action="store_true")
     ap.add_argument("--max-wait", type=int, default=600)
     ap.add_argument("--mode", choices=("auto", "tmux", "window"), default="auto")
@@ -243,8 +258,8 @@ def main() -> None:
     if not args.prompt:
         print(
             "Usage: claude-delegate.py 'task…'\n"
-            "  Always paste + Enter. Writes ~/.hermes-pong/last-claude.txt\n"
-            "  Hermes can: cat ~/.hermes-pong/last-claude.txt",
+            "  Pastes + Enter into Claude (window or tmux).\n"
+            f"  Writes {LAST_SENT} and often {LAST_REPLY}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -260,7 +275,6 @@ def main() -> None:
     state = load_state()
     mode = args.mode
     if mode == "auto":
-        # Prefer how the pair was linked (window mode = live Claude Code UI)
         if state.get("claude_mode") == "window" and state.get("claude_window_id"):
             mode = "window"
         elif state.get("claude_mode") == "tmux" and resolve_tmux_target(args.session, args.window):
@@ -281,34 +295,27 @@ def main() -> None:
             print("[bridge] No tmux pair session", file=sys.stderr)
             sys.exit(2)
         print(f"[bridge] target {target}")
-        # Bring Claude window to front so you SEE it work
         run_ok(["tmux", "select-window", "-t", target])
         send_via_tmux(target, prompt)
         if args.no_wait:
-            print("[bridge] submitted (no-wait). Watch Claude Terminal. "
-                  f"Later: cat {LAST_REPLY}")
+            print(f"[bridge] submitted (no-wait). Watch Claude Terminal. Later: cat {LAST_REPLY}")
             return
-        print("[bridge] waiting — Claude pane should show activity; Hermes gets a mirror when done")
+        print("[bridge] waiting for Claude…")
         result = wait_tmux(target, max_wait=args.max_wait)
         print("\n=== CLAUDE RESPONSE ===\n")
         print(result)
         print(f"\n[bridge] also saved → {LAST_REPLY}")
         return
 
-    # window mode
     wid = str(state.get("claude_window_id") or "")
     if not wid.isdigit():
         print("[bridge] No claude_window_id in state for window mode", file=sys.stderr)
         sys.exit(2)
     send_via_terminal_window(wid, prompt)
     if args.no_wait:
-        print("[bridge] submitted to Terminal window (no-wait). Watch that window.")
+        print("[bridge] submitted to Claude window (no-wait).")
         return
-    print(
-        "[bridge] window mode: watch Claude Terminal yourself; "
-        f"when done, copy output or re-run with tmux mode.\n"
-        f"(Live capture needs Claude inside tmux — use New pair for full feedback.)"
-    )
+    print("[bridge] window mode: watch Claude Code for the reply.")
 
 
 if __name__ == "__main__":
