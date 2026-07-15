@@ -1,0 +1,15 @@
+{
+  "product_id": "prod_UtNBmkApx2C427",
+  "prices": {
+    "2": "price_1TtaRZGytTJoxfIsC6YQZ0Di",
+    "5": "price_1TtaRaGytTJoxfIs1irUAYOP",
+    "custom": "price_1TtaRcGytTJoxfIsS52SwkBD"
+  },
+  "payment_links": {
+    "2": "https://donate.stripe.com/eVqeVdgFp8V22cj7pR1B606",
+    "5": "https://donate.stripe.com/6oU14ndtdefmaIP39B1B607",
+    "custom": "https://donate.stripe.com/5kQfZhgFpfjq6szdOf1B608"
+  },
+  "free_download": "https://github.com/kulpio/Hermes_Pairing/releases/latest/download/HermesPong-macOS.zip",
+  "release": "https://github.com/kulpio/Hermes_Pairing/releases/latest"
+}

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hermes Pong — Hermes ↔ Claude Code for Mac</title>
+  <meta name="description" content="Pair Hermes and Claude Code in Terminal. Two windows, one bridge. Free forever — tip if you like." />
+  <meta property="og:title" content="Hermes Pong" />
+  <meta property="og:description" content="Hermes drives Claude Code in the terminal next to you. Free, tip optional." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="logo.png" />
+  <style>
+    :root {
+      --bg: #0b0b0e;
+      --card: #141418;
+      --text: #f2f2f4;
+      --muted: #9a9aa3;
+      --hermes: #2602f1;
+      --claude: #d97756;
+      --line: #24242c;
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background:
+        radial-gradient(900px 500px at 10% -10%, rgba(38,2,241,.28), transparent 55%),
+        radial-gradient(700px 400px at 100% 0%, rgba(217,119,86,.18), transparent 50%),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    a { color: inherit; }
+    .wrap {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 48px 20px 80px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 36px;
+    }
+    header img {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+    }
+    header .brand {
+      font-weight: 700;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+    }
+    header .sub {
+      color: var(--muted);
+      font-size: .85rem;
+    }
+    h1 {
+      font-size: clamp(2rem, 5vw, 2.75rem);
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      margin: 0 0 16px;
+      font-weight: 750;
+    }
+    .grad {
+      background: linear-gradient(105deg, #fff 10%, #c7c4ff 45%, var(--claude) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .lead {
+      color: var(--muted);
+      font-size: 1.15rem;
+      max-width: 36em;
+      margin: 0 0 28px;
+    }
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 32px;
+    }
+    .pill {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.03);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: .85rem;
+      color: var(--muted);
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    .card h2 {
+      margin: 0 0 8px;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+    }
+    .card p {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: .95rem;
+    }
+    .price-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    @media (min-width: 560px) {
+      .price-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
+    .btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      text-decoration: none;
+      border-radius: 12px;
+      padding: 14px 10px;
+      border: 1px solid var(--line);
+      background: #1a1a20;
+      transition: transform .12s ease, border-color .12s ease, background .12s ease;
+      min-height: 72px;
+      text-align: center;
+    }
+    .btn:hover {
+      transform: translateY(-1px);
+      border-color: #3a3a48;
+      background: #202028;
+    }
+    .btn.primary {
+      background: linear-gradient(135deg, var(--hermes), #5b43ff);
+      border-color: transparent;
+      color: #fff;
+    }
+    .btn.primary:hover { filter: brightness(1.08); }
+    .btn.accent {
+      background: linear-gradient(135deg, #b45a3d, var(--claude));
+      border-color: transparent;
+      color: #fff;
+    }
+    .btn .amt { font-weight: 700; font-size: 1.15rem; letter-spacing: -0.02em; }
+    .btn .hint { font-size: .75rem; color: rgba(255,255,255,.75); }
+    .btn:not(.primary):not(.accent) .hint { color: var(--muted); }
+    .note {
+      margin-top: 14px;
+      font-size: .85rem;
+      color: var(--muted);
+    }
+    .steps {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      counter-reset: s;
+    }
+    .steps li {
+      counter-increment: s;
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 12px;
+      padding: 10px 0;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .95rem;
+    }
+    .steps li:first-child { border-top: 0; }
+    .steps li::before {
+      content: counter(s);
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: rgba(38,2,241,.2);
+      color: #c8c3ff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .8rem;
+      font-weight: 700;
+    }
+    .steps strong { color: var(--text); font-weight: 600; }
+    footer {
+      margin-top: 40px;
+      color: var(--muted);
+      font-size: .85rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 20px;
+    }
+    footer a { color: #c8c3ff; text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+    .pair {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin: 8px 0 28px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+    }
+    .tag {
+      padding: 8px 14px;
+      border-radius: 10px;
+      font-size: .9rem;
+    }
+    .tag.h { background: rgba(38,2,241,.22); color: #d4d0ff; border: 1px solid rgba(38,2,241,.35); }
+    .tag.c { background: rgba(217,119,86,.18); color: #ffd2c0; border: 1px solid rgba(217,119,86,.35); }
+    .arrow { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <img src="logo.png" alt="Hermes Pong" />
+      <div>
+        <div class="brand">Hermes Pong</div>
+        <div class="sub">macOS · Terminal · Hermes ↔ Claude Code</div>
+      </div>
+    </header>
+
+    <h1>Two terminals.<br /><span class="grad">One bridge.</span></h1>
+    <p class="lead">
+      Pair <strong style="color:#fff">Hermes</strong> and <strong style="color:#fff">Claude Code</strong>
+      so Hermes can hand work into the Claude window you already use —
+      model, resume, and context intact.
+    </p>
+
+    <div class="pair">
+      <span class="tag h">Hermes</span>
+      <span class="arrow">↔</span>
+      <span class="tag c">Claude</span>
+    </div>
+
+    <div class="pill-row">
+      <span class="pill">Link existing terminals</span>
+      <span class="pill">Or open a new pair</span>
+      <span class="pill">See tasks land in Claude</span>
+      <span class="pill">Free forever</span>
+    </div>
+
+    <section class="card" id="get">
+      <h2>Get the app</h2>
+      <p>
+        Download is free. If it helps, leave a tip — same download either way.
+        Stripe checkout, then GitHub release.
+      </p>
+      <div class="price-grid">
+        <a class="btn primary" href="https://github.com/kulpio/Hermes_Pairing/releases/latest/download/HermesPong-macOS.zip">
+          <span class="amt">$0</span>
+          <span class="hint">Free download</span>
+        </a>
+        <a class="btn" href="https://donate.stripe.com/eVqeVdgFp8V22cj7pR1B606">
+          <span class="amt">$2</span>
+          <span class="hint">Tip · Stripe</span>
+        </a>
+        <a class="btn accent" href="https://donate.stripe.com/6oU14ndtdefmaIP39B1B607">
+          <span class="amt">$5</span>
+          <span class="hint">Tip · Stripe</span>
+        </a>
+        <a class="btn" href="https://donate.stripe.com/5kQfZhgFpfjq6szdOf1B608">
+          <span class="amt">More</span>
+          <span class="hint">You choose</span>
+        </a>
+      </div>
+      <p class="note">
+        Tips go to Dylan / Boreal. After paying, Stripe sends you to the release page for the zip.
+        Or skip the tip and download free above.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li><div><strong>Install</strong> Hermes Pong on your Mac (unzip → Applications).</div></li>
+        <li><div><strong>Link existing</strong> Hermes + Claude terminals (keeps Claude model &amp; session), or start a <strong>New pair</strong>.</div></li>
+        <li><div>When Hermes delegates, the task lands in the <strong>Claude Code window</strong> — you watch it work.</div></li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>Requirements</h2>
+      <p style="margin:0">
+        macOS · Terminal.app ·
+        <a href="https://github.com/NousResearch/hermes-agent" style="color:#c8c3ff">Hermes</a> ·
+        Claude Code CLI · tmux
+      </p>
+      <p class="note" style="margin-top:12px;margin-bottom:0">
+        App is ad-hoc signed for now. First open: right-click → Open if Gatekeeper complains.
+      </p>
+    </section>
+
+    <footer>
+      <a href="https://github.com/kulpio/Hermes_Pairing">GitHub</a>
+      <a href="https://github.com/kulpio/Hermes_Pairing/blob/main/README.md">Docs</a>
+      <a href="https://github.com/kulpio/Hermes_Pairing/releases/latest">Releases</a>
+      <span>Built by Dylan · Boreal</span>
+    </footer>
+  </div>
+</body>
+</html>
