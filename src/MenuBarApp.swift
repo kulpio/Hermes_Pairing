@@ -70,10 +70,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return c
         }
         boltIdle = load("menubar-template.png", template: true)
+            ?? load("logo-mono-128.png", template: true)
             ?? load("bolt-black.png", template: true)
-        boltActiveDim = load("bolt-active-dim.png", template: false)
+        // Active connection: accent logo (Claude orange + Hermes blue dots)
         boltActiveBright = load("bolt-active.png", template: false)
-            ?? load("bolt-active-bright.png", template: false)
+            ?? load("logo-accent-128.png", template: false)
+            ?? load("logo-accent.png", template: false)
+        boltActiveDim = load("bolt-active-dim.png", template: false)
+            ?? boltActiveBright
 
         if boltIdle == nil,
            let sf = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Hermes_Pairing") {

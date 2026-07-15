@@ -32,6 +32,10 @@ cp "$ROOT/resources/pair-illustration.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-blue.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-orange.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-black.png" "$RES/" 2>/dev/null || true
+cp "$ROOT/resources/logo-monochrome.png" "$RES/" 2>/dev/null || true
+cp "$ROOT/resources/logo-accent.png" "$RES/" 2>/dev/null || true
+cp "$ROOT/resources/logo-mono-128.png" "$RES/" 2>/dev/null || true
+cp "$ROOT/resources/logo-accent-128.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-active.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-active-dim.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-active-bright.png" "$RES/" 2>/dev/null || true
