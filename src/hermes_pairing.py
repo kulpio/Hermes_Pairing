@@ -58,7 +58,7 @@ HERE = Path(__file__).resolve().parent
 ICON = HERE / "AppIcon-1024.png"
 ILLU = HERE / "pair-illustration.png"
 
-W, H = 460, 740
+W, H = 460, 800
 PAD = 28
 GUIDE_W, GUIDE_H = 340, 160
 
@@ -179,21 +179,49 @@ def next_pair_name() -> str:
 
 
 def start_fresh(name: str | None = None):
+    """
+    Create a new pair: two Terminal windows (Hermes + Claude) attached to tmux.
+    Claude starts fresh here (no prior model/context) — use Link for existing Claude.
+    """
     name = name or next_pair_name()
     sh(f"tmux has-session -t {name} 2>/dev/null && tmux kill-session -t {name} || true")
     sh(f"tmux new-session -d -s {name} -n Hermes")
-    sh(f"tmux new-window -t {name}:1 -n Claude")
+    wins = sh(f"tmux list-windows -t {name} -F '#{{window_index}}'")
+    if "1" not in wins.split():
+        sh(f"tmux new-window -t {name} -n Claude")
+    # Start claude in pane 1 before attaching so the window shows it
     sh(f"tmux send-keys -t {name}:1 -l 'claude'")
     time.sleep(0.05)
     sh(f"tmux send-keys -t {name}:1 Enter")
-    sh(f'tmux display-message -t {name}:1 "⚡ Hermes Pong — Claude starting…"')
-    sh(f'tmux display-message -t {name}:0 "⚡ HERMES — cat ~/.hermes-pong/last-claude.txt for replies"')
-    save_pair_state(name, claude_mode="tmux")
-    bring_to_front(name)
-    # Tip after New pair as well (on main thread via caller)
-    log(f"start_fresh {name}")
-    return name
 
+    # Open two real Terminal windows and hop into the panes
+    script = f'''
+tell application "Terminal"
+  activate
+  set wHermes to do script "tmux attach -t {name}:0 || tmux attach -t {name}"
+  delay 0.35
+  set idH to id of front window
+  set wClaude to do script "tmux attach -t {name}:1 || tmux attach -t {name}"
+  delay 0.35
+  set idC to id of front window
+  return (idH as string) & "," & (idC as string)
+end tell
+'''
+    out = osascript(script)
+    hid, cid = None, None
+    if out and "," in out:
+        parts = out.split(",", 1)
+        hid, cid = parts[0].strip(), parts[1].strip()
+    save_pair_state(
+        name,
+        hermes_window_id=hid,
+        claude_window_id=cid,
+        claude_mode="tmux",
+    )
+    if hid:
+        flash_pair_windows(hid, cid)
+    log(f"start_fresh {name} hermes={hid} claude={cid}")
+    return name
 
 def load_pairs_db() -> dict:
     import json
@@ -533,7 +561,7 @@ class ClaudeStreamController(NSObject):
             False,
         )
         self.window.setTitle_("Hermes Pong — Claude stream")
-        self.window.setLevel_(NSFloatingWindowLevel)
+        self.window.setLevel_(NSStatusWindowLevel + 3)
         self.window.setReleasedWhenClosed_(False)
         try:
             self.window.setBackgroundColor_(
@@ -617,7 +645,8 @@ def open_claude_stream(session: str | None = None):
 
 def show_pair_persist_tip(pair_name: str = "") -> None:
     """
-    After connect: explain pair survives app quit until Kill.
+    After connect: pair survives app quit until Kill.
+    Always on top of other windows (including Terminal).
     Don't remind me → ~/.hermes-pong/dont-remind-pair-persist
     """
     flag = Path.home() / ".hermes-pong" / "dont-remind-pair-persist"
@@ -628,13 +657,22 @@ def show_pair_persist_tip(pair_name: str = "") -> None:
     alert.setMessageText_("Pair stays connected")
     alert.setInformativeText_(
         f"“{label}” stays linked until you hit Kill — even if you quit Hermes Pong.\n\n"
-        "Hermes and Claude keep working in their own windows.\n"
-        "When Hermes delegates a task, it should appear in the Claude window\n"
-        "(paste + Enter) so you can watch Claude work."
+        "Link existing = keeps your Claude model, resume, and chat.\n"
+        "New pair = two fresh Terminals (Claude starts clean).\n\n"
+        "When Hermes delegates, watch the Claude window (or Watch Claude stream)."
     )
     alert.addButtonWithTitle_("Got it")
     alert.addButtonWithTitle_("Don't remind me")
     alert.setAlertStyle_(0)
+    # Always front — never under Terminal / panel
+    try:
+        NSApp.activateIgnoringOtherApps_(True)
+        w = alert.window()
+        if w:
+            w.setLevel_(NSStatusWindowLevel + 5)
+            w.makeKeyAndOrderFront_(None)
+    except Exception:
+        pass
     resp = alert.runModal()
     if resp == NSAlertFirstButtonReturn + 1:
         try:
@@ -830,7 +868,7 @@ class GuideController(NSObject):
             False,
         )
         self.window.setTitle_("Hermes Pong — Link")
-        self.window.setLevel_(NSStatusWindowLevel + 1)
+        self.window.setLevel_(NSStatusWindowLevel + 4)
         self.window.setReleasedWhenClosed_(False)
         try:
             self.window.setBackgroundColor_(
@@ -1121,8 +1159,13 @@ class AppDelegate(NSObject):
         )
         self.window.setTitle_("Hermes Pong")
         self.window.center()
-        self.window.setLevel_(NSFloatingWindowLevel)
+        # Always above normal apps (Terminal, Claude, etc.)
+        self.window.setLevel_(NSStatusWindowLevel + 2)
         self.window.setReleasedWhenClosed_(False)
+        try:
+            self.window.setCollectionBehavior_(1 << 0)  # can join all spaces-ish; ignore fail
+        except Exception:
+            pass
         try:
             self.window.setBackgroundColor_(
                 NSColor.colorWithCalibratedRed_green_blue_alpha_(0.07, 0.07, 0.08, 1.0)
@@ -1169,11 +1212,11 @@ class AppDelegate(NSObject):
 
         y -= 44
         content.addSubview_(btn("New pair", "startFresh:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self))
-        y -= 24
+        y -= 36
         content.addSubview_(
             lbl(
-                "Creates another Hermes + Claude pair (keeps existing ones).",
-                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 20),
+                "Opens 2 new Terminals (Hermes + Claude). Claude starts clean.",
+                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 32),
                 size=12,
                 secondary=True,
             )
@@ -1181,13 +1224,13 @@ class AppDelegate(NSObject):
 
         y -= 48
         content.addSubview_(
-            btn("Link two open Terminals", "connectWindows:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self)
+            btn("Link existing terminals", "connectWindows:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self)
         )
-        y -= 24
+        y -= 48
         content.addSubview_(
             lbl(
-                "Click each Terminal window — marks show only in the popup.",
-                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 20),
+                "Pick your open Hermes + Claude windows. Keeps Claude model, resume, and chat. Nothing injected into Claude.",
+                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 44),
                 size=12,
                 secondary=True,
             )
@@ -1197,11 +1240,11 @@ class AppDelegate(NSObject):
         content.addSubview_(
             btn("Watch Claude stream", "watchStream:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self)
         )
-        y -= 24
+        y -= 36
         content.addSubview_(
             lbl(
-                "Live I/O Hermes actually sent (tmux pane + last-sent).",
-                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 20),
+                "Live view of what Hermes actually sent (tmux pane + last-sent).",
+                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 32),
                 size=12,
                 secondary=True,
             )
