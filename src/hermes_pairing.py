@@ -43,6 +43,8 @@ from AppKit import (
     NSMenuItem,
 )
 from Foundation import NSMakeSize, NSProcessInfo, NSBundle
+import objc
+from objc import python_method
 
 HERMES_BLUE = (0x26 / 255.0, 0x02 / 255.0, 0xF1 / 255.0, 1.0)
 CLAUDE_ORANGE = (0xD9 / 255.0, 0x77 / 255.0, 0x56 / 255.0, 1.0)
@@ -508,6 +510,7 @@ class GuideController(NSObject):
         self._install_click_monitor()
         self._arm_timer()
 
+    @python_method
     def _ensure_window(self):
         if self.window is not None:
             return
@@ -552,6 +555,7 @@ class GuideController(NSObject):
         content.addSubview_(self.cancelBtn)
         self.window.setContentView_(content)
 
+    @python_method
     def _title_for(self, wid):
         if not wid:
             return ""
@@ -560,6 +564,7 @@ class GuideController(NSObject):
                 return t[:48]
         return f"window {wid}"
 
+    @python_method
     def _render(self):
         if self.phase == "hermes":
             self.stepLabel.setStringValue_("Step 1 of 2")
@@ -591,6 +596,7 @@ class GuideController(NSObject):
         else:
             self.claudeMark.setStringValue_("○  Claude  —  not selected")
 
+    @python_method
     def _install_click_monitor(self):
         self._remove_click_monitor()
         try:
@@ -610,6 +616,7 @@ class GuideController(NSObject):
             log(f"click monitor fail: {e}")
             self.monitor = None
 
+    @python_method
     def _remove_click_monitor(self):
         if self.monitor is not None:
             try:
@@ -619,6 +626,7 @@ class GuideController(NSObject):
                 pass
             self.monitor = None
 
+    @python_method
     def _arm_timer(self):
         if self.timer:
             try:
@@ -630,6 +638,7 @@ class GuideController(NSObject):
             0.2, self, "tick:", None, True
         )
 
+    @python_method
     def _stop_timer(self):
         if self.timer:
             try:
@@ -656,7 +665,8 @@ class GuideController(NSObject):
             return
         self._try_select_front(force=False)
 
-    def _try_select_front(self, force: bool):
+    @python_method
+    def _try_select_front(self, force):
         wid = _front_terminal_id()
         if not wid:
             return
@@ -680,7 +690,8 @@ class GuideController(NSObject):
                 self._accept(wid)
         self.last_front = wid
 
-    def _accept(self, wid: str):
+    @python_method
+    def _accept(self, wid):
         if self.phase == "hermes":
             self.hermes_id = wid
             self.phase = "claude"
@@ -756,11 +767,12 @@ class AppDelegate(NSObject):
         except Exception:
             pass
 
-        # Accessory: no second Dock icon. Main HermesPong.app owns Dock + app menu Quit.
+        # Regular so the control window is visible; Dock stays HermesPong main app.
+        # Accessory alone sometimes never surfaces the panel window.
         try:
-            NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-        except Exception:
             NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        except Exception:
+            pass
 
         if ICON.exists():
             img = NSImage.alloc().initWithContentsOfFile_(str(ICON))
@@ -777,6 +789,7 @@ class AppDelegate(NSObject):
             self.window.makeKeyAndOrderFront_(None)
         log("ready")
 
+    @python_method
     def _build_window(self):
         style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -876,6 +889,7 @@ class AppDelegate(NSObject):
 
         self.window.setContentView_(content)
 
+    @python_method
     def _rebuild_list(self):
         for sub in list(self.listContainer.subviews()):
             sub.removeFromSuperview()
