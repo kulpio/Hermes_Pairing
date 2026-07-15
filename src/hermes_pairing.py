@@ -180,8 +180,10 @@ def next_pair_name() -> str:
 
 def start_fresh(name: str | None = None):
     """
-    Create a new pair: two Terminal windows (Hermes + Claude) attached to tmux.
-    Claude starts fresh here (no prior model/context) — use Link for existing Claude.
+    New pair = two Terminal windows, different roles:
+      window 0 → Hermes only
+      window 1 → Claude Code only
+    Prefer Link existing if you already have Claude with model/context.
     """
     name = name or next_pair_name()
     sh(f"tmux has-session -t {name} 2>/dev/null && tmux kill-session -t {name} || true")
@@ -189,20 +191,31 @@ def start_fresh(name: str | None = None):
     wins = sh(f"tmux list-windows -t {name} -F '#{{window_index}}'")
     if "1" not in wins.split():
         sh(f"tmux new-window -t {name} -n Claude")
-    # Start claude in pane 1 before attaching so the window shows it
+
+    # Hermes on :0 only (never claude here)
+    sh(f"tmux select-window -t {name}:0")
+    sh(
+        f"tmux send-keys -t {name}:0 -l "
+        f"'printf \"\\n  HERMES · {name}:0\\n\\n\"; hermes'"
+    )
+    time.sleep(0.05)
+    sh(f"tmux send-keys -t {name}:0 Enter")
+
+    # Claude on :1 only
+    sh(f"tmux select-window -t {name}:1")
     sh(f"tmux send-keys -t {name}:1 -l 'claude'")
     time.sleep(0.05)
     sh(f"tmux send-keys -t {name}:1 Enter")
 
-    # Open two real Terminal windows and hop into the panes
+    # Exact window attach — no fallback to whole session (that stuck both on Claude)
     script = f'''
 tell application "Terminal"
   activate
-  set wHermes to do script "tmux attach -t {name}:0 || tmux attach -t {name}"
-  delay 0.35
+  do script "tmux attach-session -t {name}:0"
+  delay 0.4
   set idH to id of front window
-  set wClaude to do script "tmux attach -t {name}:1 || tmux attach -t {name}"
-  delay 0.35
+  do script "tmux attach-session -t {name}:1"
+  delay 0.4
   set idC to id of front window
   return (idH as string) & "," & (idC as string)
 end tell
@@ -1014,7 +1027,7 @@ class AppDelegate(NSObject):
         y -= 36
         content.addSubview_(
             lbl(
-                "Opens 2 new Terminals (Hermes + Claude). Claude starts clean.",
+                "Opens 2 Terminals: one Hermes, one Claude (fresh Claude).",
                 NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 32),
                 size=12,
                 secondary=True,

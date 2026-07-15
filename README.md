@@ -61,8 +61,8 @@ Use when Claude Code is already open.
 ## New pair (two fresh Terminals)
 
 1. Hermes Pong → **New pair**.  
-2. Two new Terminal windows open (Hermes pane + Claude pane).  
-3. Claude starts **clean** (set model/session in that window if you need them).
+2. Two Terminal windows: **one runs Hermes**, **one runs Claude** (not Claude twice).  
+3. Claude starts **clean** — for model/resume you already set up, use **Link existing** instead.
 
 ---
 
