@@ -1,9 +1,10 @@
 #!/bin/bash
-# Build Hermes_Pairing.app — native Swift menu bar + nested Panel.app (not "Python")
+# Build Hermes Pong.app — native Swift menu bar + nested Panel.app
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="Hermes_Pairing"
+APP_NAME="HermesPong"
+DISPLAY_NAME="Hermes Pong"
 APP="$ROOT/dist/${APP_NAME}.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
@@ -13,7 +14,7 @@ SRC_PY="$ROOT/src/hermes_pairing.py"
 SRC_SWIFT="$ROOT/src/MenuBarApp.swift"
 
 if [[ ! -x "$VENV/bin/python" ]]; then
-  echo "Missing venv. Run: python3 -m venv venv && venv/bin/pip install 'pyobjc-core==10.3.2' 'pyobjc-framework-Cocoa==10.3.2'"
+  echo "Missing venv. Run: bash scripts/setup.sh"
   exit 1
 fi
 
@@ -43,7 +44,7 @@ cp "$SRC_PY" "$RES/hermes_pairing.py"
 chmod 644 "$RES/hermes_pairing.py"
 echo "$ROOT" > "$RES/project_root"
 
-# Nested Panel.app so the control UI is named Hermes_Pairing, not Python
+# Nested Panel.app (accessory — no second Dock icon)
 PANEL="$RES/Panel.app"
 PANEL_CONTENTS="$PANEL/Contents"
 PANEL_MACOS="$PANEL_CONTENTS/MacOS"
@@ -64,26 +65,25 @@ ROOT="$(cat "$RES/project_root" 2>/dev/null || true)"
 PY="$ROOT/venv/bin/python"
 if [[ ! -x "$PY" ]]; then PY="/usr/bin/python3"; fi
 export PYTHONUNBUFFERED=1
-# Rename process in Activity Monitor / menu (best-effort)
-exec -a Hermes_Pairing "$PY" "$RES/hermes_pairing.py" --window-only
+exec -a "Hermes Pong" "$PY" "$RES/hermes_pairing.py" --window-only
 LAUNCH
 chmod +x "$PANEL_MACOS/Panel"
 
-cat > "$PANEL_CONTENTS/Info.plist" <<'PLIST'
+cat > "$PANEL_CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Hermes_Pairing</string>
+  <string>Hermes Pong</string>
   <key>CFBundleDisplayName</key>
-  <string>Hermes_Pairing</string>
+  <string>Hermes Pong</string>
   <key>CFBundleIdentifier</key>
-  <string>com.kulpio.hermes-pairing.panel</string>
+  <string>com.kulpio.hermes-pong.panel</string>
   <key>CFBundleVersion</key>
-  <string>1.1.0</string>
+  <string>1.3.0</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.1.0</string>
+  <string>1.3.0</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
@@ -97,34 +97,31 @@ cat > "$PANEL_CONTENTS/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Hermes_Pairing controls Terminal windows.</string>
+  <string>Hermes Pong controls Terminal windows.</string>
 </dict>
 </plist>
 PLIST
 echo -n "APPL????" > "$PANEL_CONTENTS/PkgInfo"
 
-# Panel is accessory-only — no second Dock icon
-# (launcher also sets process name)
-
-cat > "$CONTENTS/Info.plist" <<'PLIST'
+cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Hermes_Pairing</string>
+  <string>Hermes Pong</string>
   <key>CFBundleDisplayName</key>
-  <string>Hermes_Pairing</string>
+  <string>Hermes Pong</string>
   <key>CFBundleIdentifier</key>
-  <string>com.kulpio.hermes-pairing</string>
+  <string>com.kulpio.hermes-pong</string>
   <key>CFBundleVersion</key>
-  <string>1.2.0</string>
+  <string>1.3.0</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.2.0</string>
+  <string>1.3.0</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
-  <string>Hermes_Pairing</string>
+  <string>HermesPong</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
@@ -134,7 +131,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Hermes_Pairing controls Terminal to pair Hermes and Claude Code sessions.</string>
+  <string>Hermes Pong controls Terminal to pair Hermes and Claude Code sessions.</string>
 </dict>
 </plist>
 PLIST

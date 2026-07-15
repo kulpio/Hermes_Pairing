@@ -1,8 +1,7 @@
 import AppKit
 import Foundation
 
-/// Hermes_Pairing menu bar — single dock icon; panel is accessory (no second dock icon).
-/// Black bolt; when pairs active, top dot Claude orange + bottom dot Hermes blue pulse.
+/// Hermes Pong — menu bar + pairs. Control UI lives in nested Panel.app.
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
@@ -18,14 +17,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         resolveProjectRoot()
         loadIcons()
         NSApp.setActivationPolicy(.regular)
+        installMainMenu()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
-            // ONE dark bolt only — never emoji (that created a second gold icon)
             button.image = boltIdle
             button.image?.isTemplate = true
             button.title = ""
-            button.toolTip = "Hermes_Pairing"
+            button.toolTip = "Hermes Pong"
             button.appearsDisabled = false
         }
         statusItem.isVisible = true
@@ -36,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.openPanel()
         }
     }
@@ -44,6 +43,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         openPanel()
         return true
+    }
+
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu(title: "Hermes Pong")
+        appItem.submenu = appMenu
+
+        let about = NSMenuItem(title: "About Hermes Pong", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        appMenu.addItem(about)
+        appMenu.addItem(NSMenuItem.separator())
+
+        let open = NSMenuItem(title: "Open Control Panel", action: #selector(openPanel), keyEquivalent: "o")
+        open.target = self
+        appMenu.addItem(open)
+        appMenu.addItem(NSMenuItem.separator())
+
+        let quit = NSMenuItem(title: "Quit Hermes Pong", action: #selector(quitAll), keyEquivalent: "q")
+        quit.target = self
+        appMenu.addItem(quit)
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc func showAbout() {
+        let alert = NSAlert()
+        alert.messageText = "Hermes Pong"
+        alert.informativeText = "Pair Hermes + Claude Code in Terminal.\nkulpio/Hermes_Pairing"
+        alert.runModal()
     }
 
     private func resolveProjectRoot() {
@@ -72,15 +102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         boltIdle = load("menubar-template.png", template: true)
             ?? load("logo-mono-128.png", template: true)
             ?? load("bolt-black.png", template: true)
-        // Active connection: accent logo (Claude orange + Hermes blue dots)
         boltActiveBright = load("bolt-active.png", template: false)
             ?? load("logo-accent-128.png", template: false)
             ?? load("logo-accent.png", template: false)
-        boltActiveDim = load("bolt-active-dim.png", template: false)
-            ?? boltActiveBright
+        boltActiveDim = load("bolt-active-dim.png", template: false) ?? boltActiveBright
 
         if boltIdle == nil,
-           let sf = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Hermes_Pairing") {
+           let sf = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Hermes Pong") {
             sf.isTemplate = true
             boltIdle = sf
         }
@@ -112,10 +140,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem?.button else { return }
 
         if active, let dim = boltActiveDim, let bright = boltActiveBright {
-            // Pulse: black bolt stays; dots breathe Hermes blue / Claude orange
             glowPhase += 0.08
             if glowPhase > .pi * 2 { glowPhase -= .pi * 2 }
-            let t = (sin(glowPhase) + 1) / 2  // 0...1
+            let t = (sin(glowPhase) + 1) / 2
             button.image = crossfade(dim, bright, t: t)
             button.image?.isTemplate = false
             button.title = ""
@@ -168,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("New pair", #selector(newPair)))
         menu.addItem(item("Refresh", #selector(refreshMenu)))
         menu.addItem(.separator())
-        menu.addItem(item("Quit Hermes_Pairing", #selector(quit)))
+        menu.addItem(item("Quit Hermes Pong", #selector(quitAll)))
         statusItem.menu = menu
     }
 
@@ -183,14 +210,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openPanel() {
         let panelPaths = [
             Bundle.main.bundlePath + "/Contents/Resources/Panel.app",
+            "/Applications/HermesPong.app/Contents/Resources/Panel.app",
             "/Applications/Hermes_Pairing.app/Contents/Resources/Panel.app",
         ]
         if let panel = panelPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) {
-            // Activate existing panel window if running; else open
             NSWorkspace.shared.open(URL(fileURLWithPath: panel))
             return
         }
-        // fallback
         let script = "\(projectRoot)/src/hermes_pairing.py"
         let py = "\(projectRoot)/venv/bin/python"
         guard FileManager.default.fileExists(atPath: script) else { return }
@@ -218,7 +244,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tmux send-keys -t \(name):1 'cd ~ && claude' Enter
         osascript -e 'tell application "Terminal" to activate' -e 'tell application "Terminal" to do script "tmux attach -t \(name)"'
         """)
-        notify("New pair", name)
         rebuildMenu()
     }
 
@@ -232,12 +257,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func killNamed(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         runShell("tmux kill-session -t \(name) 2>/dev/null || true")
-        notify("Killed", name)
         rebuildMenu()
     }
 
-    @objc func quit() {
-        // Kill panel helper too (no second dock icon after quit)
+    @objc func quitAll() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         p.arguments = ["-f", "hermes_pairing.py"]
@@ -252,13 +275,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.arguments = ["-lc", script]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
-        try? p.run()
-    }
-
-    private func notify(_ title: String, _ msg: String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", "display notification \"\(msg)\" with title \"\(title)\""]
         try? p.run()
     }
 }

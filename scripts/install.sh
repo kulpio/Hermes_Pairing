@@ -1,11 +1,14 @@
 #!/bin/bash
-# Install Hermes_Pairing.app into /Applications and optionally enable login item
+# Install Hermes Pong to /Applications
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="Hermes_Pairing.app"
+APP_NAME="HermesPong.app"
 SRC_APP="$ROOT/dist/$APP_NAME"
 DEST="/Applications/$APP_NAME"
+
+# Remove old names
+rm -rf /Applications/Hermes_Pairing.app /Applications/HermesClaude.app 2>/dev/null || true
 
 if [[ ! -d "$SRC_APP" ]]; then
   bash "$ROOT/scripts/build-app.sh"
@@ -22,6 +25,9 @@ if [[ "${1:-}" == "--login" ]]; then
   osascript <<EOF
 tell application "System Events"
   try
+    delete login item "HermesPong"
+  end try
+  try
     delete login item "Hermes_Pairing"
   end try
   try
@@ -34,4 +40,4 @@ EOF
 fi
 
 open "$DEST"
-echo "Launched Hermes_Pairing."
+echo "Launched Hermes Pong."

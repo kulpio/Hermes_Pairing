@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Hermes_Pairing control window — multi-pair list, kill/rejoin, dark UI.
+Hermes Pong control panel — multi-pair list, click-to-link with guide popup.
 """
 
 from __future__ import annotations
 
-import os
-import re
 import subprocess
 import threading
 import time
@@ -21,7 +19,6 @@ from AppKit import (
     NSButton,
     NSTextField,
     NSImageView,
-    NSScrollView,
     NSMakeRect,
     NSBackingStoreBuffered,
     NSWindowStyleMaskTitled,
@@ -34,31 +31,32 @@ from AppKit import (
     NSImage,
     NSColor,
     NSApplicationActivationPolicyRegular,
+    NSApplicationActivationPolicyAccessory,
     NSLineBreakByWordWrapping,
     NSBezelStyleRounded,
     NSImageScaleProportionallyUpOrDown,
     NSImageAlignCenter,
     NSScreen,
     NSBezierPath,
-    NSGraphicsContext,
+    NSTimer,
+    NSMenu,
+    NSMenuItem,
 )
-from Foundation import NSMakeSize, NSMakePoint, NSMakeRect as NSRect
+from Foundation import NSMakeSize, NSProcessInfo, NSBundle
 
-# Brand colors
 HERMES_BLUE = (0x26 / 255.0, 0x02 / 255.0, 0xF1 / 255.0, 1.0)
 CLAUDE_ORANGE = (0xD9 / 255.0, 0x77 / 255.0, 0x56 / 255.0, 1.0)
 
-# Keep overlay windows alive while linking
 _OVERLAYS: list = []
 
-SESSION_PREFIXES = ("hermes-claude", "hermes-pair")
-LOG = Path.home() / "Library" / "Logs" / "Hermes_Pairing.log"
+LOG = Path.home() / "Library" / "Logs" / "HermesPong.log"
 HERE = Path(__file__).resolve().parent
 ICON = HERE / "AppIcon-1024.png"
 ILLU = HERE / "pair-illustration.png"
 
 W, H = 460, 680
 PAD = 28
+GUIDE_W, GUIDE_H = 340, 160
 
 
 def log(msg: str):
@@ -78,38 +76,14 @@ def sh(cmd: str) -> str:
         return str(e)
 
 
-def notify(title: str, message: str = ""):
-    """Deliver notification with Hermes_Pairing branding when possible."""
-    try:
-        from Foundation import NSUserNotification, NSUserNotificationCenter
-        n = NSUserNotification.alloc().init()
-        n.setTitle_(title)
-        if message:
-            n.setInformativeText_(message[:200])
-        # Prefer delivered as this process (Panel.app → Hermes_Pairing icon)
-        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(n)
-        return
-    except Exception as e:
-        log(f"NSUserNotification fail: {e}")
-    # Fallback: osascript (generic icon)
-    safe_t = title.replace('"', "'")
-    safe_m = message.replace('"', "'")[:200]
-    sh(f'''osascript -e 'display notification "{safe_m}" with title "{safe_t}"' ''')
-
-
 def list_pairs() -> list[str]:
-    """All hermes pairing tmux sessions."""
     out = sh("tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
     names = []
     for s in out.splitlines():
         s = s.strip()
         if not s:
             continue
-        if (
-            s == "hermes-claude"
-            or s.startswith("hermes-claude-")
-            or s.startswith("hermes-pair")
-        ):
+        if s == "hermes-claude" or s.startswith("hermes-claude-") or s.startswith("hermes-pair"):
             names.append(s)
     log(f"list_pairs raw={out!r} filtered={names}")
     return names
@@ -135,8 +109,7 @@ def start_fresh(name: str | None = None):
     sh(f"tmux new-window -t {name}:1 -n Claude")
     sh(f"tmux send-keys -t {name}:1 'cd ~ && claude' Enter")
     bring_to_front(name)
-    notify("New pair", name)
-    log(f"start_fresh created {name}; now={list_pairs()}")
+    log(f"start_fresh {name}")
     return name
 
 
@@ -145,17 +118,14 @@ def bring_to_front(name: str):
         f'''osascript -e 'tell application "Terminal" to activate' '''
         f''' -e 'tell application "Terminal" to do script "tmux attach -t {name}"' '''
     )
-    sh('''osascript -e 'tell application "System Events" to set frontmost of process "Terminal" to true' ''')
 
 
 def kill_pair(name: str):
     sh(f"tmux kill-session -t {name} 2>/dev/null || true")
-    notify("Killed", name)
-    log(f"killed {name}; now={list_pairs()}")
+    log(f"killed {name}")
 
 
 def _front_terminal_id() -> str | None:
-    """Return Terminal front window id, or None."""
     script = '''
     tell application "Terminal"
         try
@@ -185,10 +155,6 @@ def _mouse_down() -> bool:
 
 
 def _front_terminal_frame_cocoa():
-    """
-    Frame of front Terminal window in Cocoa coords (origin bottom-left).
-    Returns (x, y, w, h) or None.
-    """
     script = '''
     tell application "System Events"
         tell process "Terminal"
@@ -210,20 +176,15 @@ def _front_terminal_frame_cocoa():
         x, y_top, w, h = [float(p) for p in r.split(",")]
     except ValueError:
         return None
-    # System Events uses top-left global coords (primary display top-left origin, Y down).
-    # Cocoa uses bottom-left of primary display, Y up.
     try:
         main_h = NSScreen.mainScreen().frame().size.height
     except Exception:
         main_h = 900.0
-    cocoa_y = main_h - y_top - h
-    return (x, cocoa_y, w, h)
+    return (x, main_h - y_top - h, w, h)
 
 
 class _BorderView(NSView):
-    """Transparent fill + colored ring (overlay highlight)."""
-
-    color = None  # set before draw
+    color = None
     thickness = 5.0
 
     def drawRect_(self, rect):
@@ -256,16 +217,13 @@ def clear_overlays():
     _OVERLAYS = []
 
 
-def show_window_overlay(label: str, color_rgba, duration: float = 1.4):
-    """Draw a border-only overlay on the front Terminal window (no full-window wash)."""
+def show_window_overlay(label: str, color_rgba, duration: float = 1.6):
     frame = _front_terminal_frame_cocoa()
     if not frame:
-        log("overlay: no frame")
         return
     x, y, w, h = frame
     r, g, b, a = color_rgba
     color = NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, a)
-
     win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         NSMakeRect(x, y, w, h),
         NSWindowStyleMaskBorderless,
@@ -274,19 +232,15 @@ def show_window_overlay(label: str, color_rgba, duration: float = 1.4):
     )
     win.setOpaque_(False)
     win.setBackgroundColor_(NSColor.clearColor())
-    win.setIgnoresMouseEvents_(True)  # clicks pass through
+    win.setIgnoresMouseEvents_(True)
     win.setLevel_(NSStatusWindowLevel)
     win.setHasShadow_(False)
-    win.setCollectionBehavior_(1 << 0)  # can join all spaces-ish; best-effort
-
     view = _BorderView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
     view.color = color
     win.setContentView_(view)
     win.orderFrontRegardless()
     _OVERLAYS.append(win)
-    log(f"overlay shown label={label} frame={frame}")
 
-    # auto-fade later (caller may also clear)
     def _later():
         time.sleep(duration)
         try:
@@ -297,90 +251,25 @@ def show_window_overlay(label: str, color_rgba, duration: float = 1.4):
     threading.Thread(target=_later, daemon=True).start()
 
 
-def pick_window(prompt: str, label: str, exclude_id: str | None = None) -> str | None:
-    """
-    True click-to-select: wait for a left-click, then take the front Terminal
-    (the one the user just clicked). Show a border overlay, not a blue fill.
-    """
-    color = HERMES_BLUE if "HERMES" in label.upper() else CLAUDE_ORANGE
-    notify("Hermes_Pairing", f"{prompt} — CLICK the Terminal window")
-    log(f"pick_window CLICK mode label={label} exclude={exclude_id}")
-
-    deadline = time.time() + 15.0
-    was_down = _mouse_down()
-
-    while time.time() < deadline:
-        down = _mouse_down()
-        # rising edge = click
-        if down and not was_down:
-            time.sleep(0.12)  # let Terminal become front after the click
-            wid = _front_terminal_id()
-            if wid and wid != exclude_id:
-                # Tag title lightly (not a theme change)
-                sh(
-                    f'''osascript -e 'tell application "Terminal" to try
-                    set custom title of window id {wid} to "● {label}"
-                end try' '''
-                )
-                show_window_overlay(label, color, duration=1.6)
-                notify(f"{label} selected", "Border highlight on that window")
-                log(f"pick_window ok label={label} id={wid}")
-                was_down = down
-                time.sleep(0.35)
-                return wid
-            if wid and wid == exclude_id:
-                notify("Same window", "Click the OTHER Terminal")
-                log("pick_window rejected: same as exclude")
-        was_down = down
-        time.sleep(0.03)
-
-    notify("Timed out", f"Click a Terminal for {label}")
-    log(f"pick_window timeout label={label}")
-    return None
-
-
-def connect_windows():
-    clear_overlays()
-    name = next_pair_name()
-    notify("Link Terminals", "1/2 — CLICK the HERMES Terminal")
-    w1 = pick_window("HERMES Terminal", "HERMES", exclude_id=None)
-    if not w1:
-        clear_overlays()
-        return
-    notify("Link Terminals", "2/2 — CLICK the CLAUDE Terminal")
-    w2 = pick_window("CLAUDE Terminal", "CLAUDE", exclude_id=w1)
-    if not w2:
-        clear_overlays()
-        return
-    if w1 == w2:
-        notify("Same window", "Need two different Terminal windows")
-        log(f"connect_windows same id {w1}")
-        clear_overlays()
-        return
-
+def wire_pair(name: str, w1: str, w2: str):
     sh(f"tmux new-session -d -s {name} -n Hermes 2>/dev/null || true")
     sh(f"tmux new-window -t {name}:1 -n Claude 2>/dev/null || true")
     sh(
         f'''osascript -e 'tell application "Terminal" to do script "tmux attach -t {name}:0" in window id {w1}' '''
     )
-    time.sleep(0.8)
+    time.sleep(0.6)
     sh(
         f'''osascript -e 'tell application "Terminal" to do script "tmux attach -t {name}:1 || tmux new-window -t {name}:1 -n Claude; tmux attach -t {name}:1" in window id {w2}' '''
     )
-    time.sleep(0.5)
+    time.sleep(0.4)
     sh(f"tmux send-keys -t {name}:1 'cd ~ && claude' Enter")
     sh('''osascript -e 'tell application "Terminal" to activate' ''')
-    notify("Linked", name)
-    log(f"connect_windows linked {name} w1={w1} w2={w2} sessions={list_pairs()}")
-    time.sleep(1.2)
-    clear_overlays()
+    log(f"wired {name} w1={w1} w2={w2}")
 
 
 def lbl(text, frame, bold=False, size=13.0, secondary=False):
     f = NSTextField.labelWithString_(text)
-    f.setFont_(
-        NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
-    )
+    f.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
     if secondary:
         try:
             f.setTextColor_(NSColor.secondaryLabelColor())
@@ -392,7 +281,7 @@ def lbl(text, frame, bold=False, size=13.0, secondary=False):
     f.setDrawsBackground_(False)
     try:
         f.setLineBreakMode_(NSLineBreakByWordWrapping)
-        f.setMaximumNumberOfLines_(3)
+        f.setMaximumNumberOfLines_(4)
     except Exception:
         pass
     return f
@@ -407,25 +296,235 @@ def btn(title, action, frame, target):
     return b
 
 
+class GuideController(NSObject):
+    """Small floating guide window + click-to-select state machine (main thread)."""
+
+    window = None
+    titleLabel = None
+    bodyLabel = None
+    stepLabel = None
+    cancelBtn = None
+    timer = None
+    phase = None  # "hermes" | "claude" | None
+    was_down = False
+    hermes_id = None
+    pair_name = None
+    parent = None
+    started = 0.0
+
+    def showGuide_body_step_(self, title, body, step):
+        if self.window is None:
+            self._make()
+        self.titleLabel.setStringValue_(title)
+        self.bodyLabel.setStringValue_(body)
+        self.stepLabel.setStringValue_(step)
+        self.window.center()
+        self.window.makeKeyAndOrderFront_(None)
+        NSApp.activateIgnoringOtherApps_(True)
+        log(f"guide: {title} | {body}")
+
+    def _make(self):
+        self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, GUIDE_W, GUIDE_H),
+            NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
+            NSBackingStoreBuffered,
+            False,
+        )
+        self.window.setTitle_("Hermes Pong")
+        self.window.setLevel_(NSStatusWindowLevel + 1)
+        self.window.setReleasedWhenClosed_(False)
+        try:
+            self.window.setBackgroundColor_(
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.10, 0.10, 0.12, 1.0)
+            )
+        except Exception:
+            pass
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, GUIDE_W, GUIDE_H))
+        self.stepLabel = lbl("Step 1 of 2", NSMakeRect(16, GUIDE_H - 36, GUIDE_W - 32, 18), size=11, secondary=True)
+        self.titleLabel = lbl("Click HERMES Terminal", NSMakeRect(16, GUIDE_H - 64, GUIDE_W - 32, 24), bold=True, size=16)
+        self.bodyLabel = lbl(
+            "Click the Terminal window that should be Hermes.\nA blue ring will confirm.",
+            NSMakeRect(16, 44, GUIDE_W - 32, 48),
+            size=12,
+            secondary=True,
+        )
+        self.cancelBtn = btn("Cancel", "cancelLink:", NSMakeRect(GUIDE_W - 100, 12, 84, 28), self)
+        content.addSubview_(self.stepLabel)
+        content.addSubview_(self.titleLabel)
+        content.addSubview_(self.bodyLabel)
+        content.addSubview_(self.cancelBtn)
+        self.window.setContentView_(content)
+
+    def startLinkWithParent_(self, parent):
+        self.parent = parent
+        clear_overlays()
+        self.phase = "hermes"
+        self.hermes_id = None
+        self.pair_name = next_pair_name()
+        self.was_down = _mouse_down()
+        self.started = time.time()
+        # Instant guide — no notification lag
+        self.showGuide_body_step_(
+            "Click HERMES Terminal",
+            "Click the Terminal that should run Hermes.\nA blue ring confirms the pick.",
+            "Step 1 of 2",
+        )
+        self._arm_timer()
+
+    def _arm_timer(self):
+        if self.timer:
+            try:
+                self.timer.invalidate()
+            except Exception:
+                pass
+        self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.04, self, "tick:", None, True
+        )
+
+    def tick_(self, timer):
+        if self.phase not in ("hermes", "claude"):
+            return
+        if time.time() - self.started > 20:
+            self.showGuide_body_step_("Timed out", "No click detected. Try Link again.", "—")
+            self._stop_timer()
+            self.phase = None
+            return
+
+        down = _mouse_down()
+        if down and not self.was_down:
+            time.sleep(0.10)
+            wid = _front_terminal_id()
+            if self.phase == "hermes":
+                if wid:
+                    self.hermes_id = wid
+                    sh(
+                        f'''osascript -e 'tell application "Terminal" to try
+                        set custom title of window id {wid} to "● HERMES"
+                    end try' '''
+                    )
+                    show_window_overlay("HERMES", HERMES_BLUE)
+                    self.phase = "claude"
+                    self.started = time.time()
+                    self.showGuide_body_step_(
+                        "Click CLAUDE Terminal",
+                        "Now click a different Terminal for Claude.\nAn orange ring confirms.",
+                        "Step 2 of 2",
+                    )
+            elif self.phase == "claude":
+                if wid and wid != self.hermes_id:
+                    sh(
+                        f'''osascript -e 'tell application "Terminal" to try
+                        set custom title of window id {wid} to "● CLAUDE"
+                    end try' '''
+                    )
+                    show_window_overlay("CLAUDE", CLAUDE_ORANGE)
+                    self.phase = "wiring"
+                    self.showGuide_body_step_(
+                        "Linking…",
+                        f"Wiring pair “{self.pair_name}”. One moment.",
+                        "Almost done",
+                    )
+                    self._stop_timer()
+                    # finish off main thread so UI stays snappy
+                    hid, cid, name, parent = self.hermes_id, wid, self.pair_name, self.parent
+
+                    def work():
+                        try:
+                            wire_pair(name, hid, cid)
+                        finally:
+                            def done():
+                                self.showGuide_body_step_(
+                                    "Linked",
+                                    f"Pair “{name}” is ready.",
+                                    "Done",
+                                )
+                                if parent:
+                                    parent.refreshUI_(None)
+                                def close():
+                                    self.closeGuide()
+                                    clear_overlays()
+                                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                                    1.2, self, "closeGuideTimer:", None, False
+                                )
+                            # hop back to main
+                            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                                "finishOk:", name, False
+                            )
+
+                    threading.Thread(target=work, daemon=True).start()
+                elif wid and wid == self.hermes_id:
+                    self.showGuide_body_step_(
+                        "Same window",
+                        "Click the OTHER Terminal for Claude.",
+                        "Step 2 of 2",
+                    )
+        self.was_down = down
+
+    def finishOk_(self, name):
+        self.showGuide_body_step_("Linked", f"Pair “{name}” is ready.", "Done")
+        if self.parent:
+            self.parent.refreshUI_(None)
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            1.2, self, "closeGuideTimer:", None, False
+        )
+
+    def closeGuideTimer_(self, timer):
+        self.closeGuide()
+        clear_overlays()
+
+    def cancelLink_(self, sender):
+        self._stop_timer()
+        self.phase = None
+        clear_overlays()
+        self.closeGuide()
+
+    def closeGuide(self):
+        self._stop_timer()
+        self.phase = None
+        if self.window:
+            self.window.orderOut_(None)
+
+    def _stop_timer(self):
+        if self.timer:
+            try:
+                self.timer.invalidate()
+            except Exception:
+                pass
+            self.timer = None
+
+
 class AppDelegate(NSObject):
     window = None
     statusLabel = None
     listContainer = None
-    pair_buttons = None  # keep refs
+    pair_buttons = None
+    guide = None
 
     def applicationDidFinishLaunching_(self, notification):
-        log("applicationDidFinishLaunching")
+        log("applicationDidFinishLaunching Hermes Pong panel")
         try:
-            from AppKit import NSApplicationActivationPolicyAccessory
+            NSProcessInfo.processInfo().setProcessName_("Hermes Pong")
+            info = NSBundle.mainBundle().infoDictionary()
+            if info is not None:
+                info["CFBundleName"] = "Hermes Pong"
+                info["CFBundleDisplayName"] = "Hermes Pong"
+        except Exception:
+            pass
+
+        # Accessory: no second Dock icon. Main HermesPong.app owns Dock + app menu Quit.
+        try:
             NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
         except Exception:
             NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+
         if ICON.exists():
             img = NSImage.alloc().initWithContentsOfFile_(str(ICON))
             if img:
                 img.setSize_(NSMakeSize(128, 128))
                 NSApp.setApplicationIconImage_(img)
+
         self.pair_buttons = []
+        self.guide = GuideController.alloc().init()
         self._build_window()
         self.refreshUI_(None)
         NSApp.activateIgnoringOtherApps_(True)
@@ -434,18 +533,14 @@ class AppDelegate(NSObject):
         log("ready")
 
     def _build_window(self):
-        style = (
-            NSWindowStyleMaskTitled
-            | NSWindowStyleMaskClosable
-            | NSWindowStyleMaskMiniaturizable
-        )
+        style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, W, H),
             style,
             NSBackingStoreBuffered,
             False,
         )
-        self.window.setTitle_("Hermes_Pairing")
+        self.window.setTitle_("Hermes Pong")
         self.window.center()
         self.window.setLevel_(NSFloatingWindowLevel)
         self.window.setReleasedWhenClosed_(False)
@@ -466,7 +561,7 @@ class AppDelegate(NSObject):
         y -= 24
         content.addSubview_(
             lbl(
-                "Two terminals. One bridge. Multiple pairs OK.",
+                "Hermes Pong — two terminals, one bridge.",
                 NSMakeRect(PAD, y, W - 2 * PAD, 20),
                 size=13,
                 secondary=True,
@@ -474,12 +569,7 @@ class AppDelegate(NSObject):
         )
 
         y -= 30
-        self.statusLabel = lbl(
-            "○ Idle",
-            NSMakeRect(PAD, y, W - 2 * PAD, 20),
-            size=13,
-            secondary=True,
-        )
+        self.statusLabel = lbl("○ Idle", NSMakeRect(PAD, y, W - 2 * PAD, 20), size=13, secondary=True)
         content.addSubview_(self.statusLabel)
 
         y -= 120
@@ -489,27 +579,21 @@ class AppDelegate(NSObject):
         if illu.exists():
             nsimg = NSImage.alloc().initWithContentsOfFile_(str(illu))
             if nsimg:
-                iv = NSImageView.alloc().initWithFrame_(
-                    NSMakeRect(PAD, y, W - 2 * PAD, 110)
-                )
+                iv = NSImageView.alloc().initWithFrame_(NSMakeRect(PAD, y, W - 2 * PAD, 110))
                 iv.setImage_(nsimg)
                 iv.setImageScaling_(NSImageScaleProportionallyUpOrDown)
                 iv.setImageAlignment_(NSImageAlignCenter)
                 content.addSubview_(iv)
 
         y -= 36
-        content.addSubview_(
-            lbl("SETUP", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True)
-        )
+        content.addSubview_(lbl("SETUP", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True))
 
         y -= 44
-        content.addSubview_(
-            btn("New pair", "startFresh:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self)
-        )
+        content.addSubview_(btn("New pair", "startFresh:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self))
         y -= 24
         content.addSubview_(
             lbl(
-                "Creates another Hermes + Claude pair (does not replace existing ones).",
+                "Creates another Hermes + Claude pair (keeps existing ones).",
                 NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 20),
                 size=12,
                 secondary=True,
@@ -518,17 +602,12 @@ class AppDelegate(NSObject):
 
         y -= 48
         content.addSubview_(
-            btn(
-                "Link two open Terminals",
-                "connectWindows:",
-                NSMakeRect(PAD, y, W - 2 * PAD, 38),
-                self,
-            )
+            btn("Link two open Terminals", "connectWindows:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self)
         )
         y -= 24
         content.addSubview_(
             lbl(
-                "Wire two Terminal windows you already opened into a new pair.",
+                "Opens a guide popup — click each Terminal (not hover).",
                 NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 20),
                 size=12,
                 secondary=True,
@@ -540,18 +619,12 @@ class AppDelegate(NSObject):
             lbl("ACTIVE PAIRS", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True)
         )
 
-        # dynamic list area
         y -= 200
-        self.listContainer = NSView.alloc().initWithFrame_(
-            NSMakeRect(PAD, y, W - 2 * PAD, 190)
-        )
+        self.listContainer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, W - 2 * PAD, 190))
         content.addSubview_(self.listContainer)
 
-        # footer
         half = (W - 2 * PAD - 12) / 2
-        content.addSubview_(
-            btn("Refresh", "refreshUI:", NSMakeRect(PAD, 24, half, 36), self)
-        )
+        content.addSubview_(btn("Refresh", "refreshUI:", NSMakeRect(PAD, 24, half, 36), self))
         content.addSubview_(
             btn("Close Panel", "quitPanel:", NSMakeRect(PAD + half + 12, 24, half, 36), self)
         )
@@ -559,29 +632,19 @@ class AppDelegate(NSObject):
         self.window.setContentView_(content)
 
     def _rebuild_list(self):
-        # clear
         for sub in list(self.listContainer.subviews()):
             sub.removeFromSuperview()
         self.pair_buttons = []
-
         pairs = list_pairs()
         if not pairs:
             self.listContainer.addSubview_(
-                lbl(
-                    "No pairs yet — use New pair.",
-                    NSMakeRect(0, 150, W - 2 * PAD, 20),
-                    size=12,
-                    secondary=True,
-                )
+                lbl("No pairs yet — use New pair.", NSMakeRect(0, 150, W - 2 * PAD, 20), size=12, secondary=True)
             )
             return
-
         y = 150
         for name in pairs:
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, y - 8, W - 2 * PAD, 44))
-            row.addSubview_(
-                lbl(f"●  {name}", NSMakeRect(0, 12, 200, 20), bold=True, size=13)
-            )
+            row.addSubview_(lbl(f"●  {name}", NSMakeRect(0, 12, 200, 20), bold=True, size=13))
             b1 = btn("Front", "frontPair:", NSMakeRect(210, 6, 70, 30), self)
             b2 = btn("Kill", "killPair:", NSMakeRect(288, 6, 70, 30), self)
             b1.setIdentifier_(name)
@@ -595,18 +658,17 @@ class AppDelegate(NSObject):
     def startFresh_(self, sender):
         def work():
             start_fresh()
-            time.sleep(0.3)
-            self.refreshUI_(None)
+            time.sleep(0.2)
+            self.performSelectorOnMainThread_withObject_waitUntilDone_("refreshUI:", None, False)
 
         threading.Thread(target=work, daemon=True).start()
 
     def connectWindows_(self, sender):
-        def work():
-            connect_windows()
-            time.sleep(0.3)
-            self.refreshUI_(None)
-
-        threading.Thread(target=work, daemon=True).start()
+        # Instant guide on main thread — no 40s notification lag
+        log("connectWindows_ → guide")
+        if self.guide is None:
+            self.guide = GuideController.alloc().init()
+        self.guide.startLinkWithParent_(self)
 
     def frontPair_(self, sender):
         name = sender.identifier()
@@ -628,7 +690,9 @@ class AppDelegate(NSObject):
         self._rebuild_list()
 
     def quitPanel_(self, sender):
-        # close window only; menu bar Swift app keeps running
+        if self.guide:
+            self.guide.closeGuide()
+        clear_overlays()
         if self.window:
             self.window.close()
         NSApp.terminate_(None)
@@ -639,28 +703,20 @@ class AppDelegate(NSObject):
 
 def main():
     import sys
-    log(f"main enter args={sys.argv}")
 
-    # Appear as Hermes_Pairing in the menu bar (not "Python") when possible
+    log(f"main enter args={sys.argv}")
     try:
-        from Foundation import NSProcessInfo, NSBundle
-        NSProcessInfo.processInfo().setProcessName_("Hermes_Pairing")
+        NSProcessInfo.processInfo().setProcessName_("Hermes Pong")
         info = NSBundle.mainBundle().infoDictionary()
         if info is not None:
-            info["CFBundleName"] = "Hermes_Pairing"
-            info["CFBundleDisplayName"] = "Hermes_Pairing"
+            info["CFBundleName"] = "Hermes Pong"
+            info["CFBundleDisplayName"] = "Hermes Pong"
     except Exception as e:
         log(f"rename skip: {e}")
 
     app = NSApplication.sharedApplication()
     delegate = AppDelegate.alloc().init()
     app.setDelegate_(delegate)
-    # Accessory: no second Dock icon (main Hermes_Pairing app owns the Dock)
-    try:
-        from AppKit import NSApplicationActivationPolicyAccessory
-        app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-    except Exception:
-        app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
     app.run()
 
 
