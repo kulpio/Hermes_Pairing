@@ -58,7 +58,7 @@ HERE = Path(__file__).resolve().parent
 ICON = HERE / "AppIcon-1024.png"
 ILLU = HERE / "pair-illustration.png"
 
-W, H = 460, 680
+W, H = 460, 740
 PAD = 28
 GUIDE_W, GUIDE_H = 340, 160
 
@@ -418,7 +418,6 @@ def wire_pair(name: str, w1: str, w2: str):
 
 def kill_pair(name: str):
     sh(f"tmux kill-session -t {name} 2>/dev/null || true")
-    # drop from registry
     try:
         import json
         db = load_pairs_db()
@@ -428,6 +427,192 @@ def kill_pair(name: str):
     except Exception:
         pass
     log(f"killed {name}")
+
+
+def claude_stream_text(session: str | None = None) -> str:
+    """What Hermes actually sent / what the Claude *tmux* pane shows."""
+    import json
+    state_dir = Path.home() / ".hermes-pong"
+    sess = session
+    if not sess:
+        ap = state_dir / "active-pair.json"
+        if ap.exists():
+            try:
+                sess = json.loads(ap.read_text()).get("session")
+            except Exception:
+                pass
+    if not sess:
+        pairs = list_pairs()
+        sess = pairs[0] if pairs else None
+
+    last_sent = ""
+    p = state_dir / "last-sent.txt"
+    if p.exists():
+        last_sent = p.read_text()
+    last_reply = ""
+    r = state_dir / "last-claude.txt"
+    if r.exists():
+        last_reply = r.read_text()
+
+    pane = ""
+    if sess:
+        pane = sh(f"tmux capture-pane -p -t {sess}:1 -S -80 2>/dev/null || true")
+        if not pane.strip():
+            pane = sh(f"tmux capture-pane -p -t {sess} -S -80 2>/dev/null || true")
+
+    mode = ""
+    if (state_dir / "active-pair.json").exists():
+        try:
+            mode = json.loads((state_dir / "active-pair.json").read_text()).get("claude_mode", "")
+        except Exception:
+            pass
+
+    parts = [
+        f"session: {sess or '(none)'}   mode: {mode or '?'}",
+        "",
+        "═══ LAST SENT (bridge) ═══",
+        last_sent.strip() or "(nothing recorded in last-sent.txt yet)",
+        "",
+        "═══ CLAUDE TMUX PANE (:1) — this is where Hermes send-keys land ═══",
+        pane.strip() or "(empty / no tmux pane)",
+        "",
+        "═══ LAST REPLY MIRROR ═══",
+        last_reply.strip() or "(no last-claude.txt yet)",
+    ]
+    if mode == "window":
+        parts.insert(
+            2,
+            "NOTE: Pair is window-mode — your Claude Code UI window is separate.\n"
+            "Hermes often writes to tmux :1 (shown below). Watch this stream for that I/O.\n"
+            "For Hermes to paste into the live Claude Code window, it must use claude-delegate.py\n"
+            "(window mode), not raw tmux send-keys.\n",
+        )
+    return "\n".join(parts)
+
+
+# Global stream controller ref
+_STREAM = None
+
+
+class ClaudeStreamController(NSObject):
+    """Floating window: live I/O Hermes ↔ Claude (tmux pane + last-sent)."""
+
+    window = None
+    textView = None
+    scroll = None
+    timer = None
+    session = None
+    statusLabel = None
+
+    @python_method
+    def open_for_session(self, session: str | None = None):
+        self.session = session
+        self._ensure()
+        self.refresh_(None)
+        self.window.center()
+        self.window.makeKeyAndOrderFront_(None)
+        NSApp.activateIgnoringOtherApps_(True)
+        self._arm()
+        log(f"claude stream open session={session}")
+
+    @python_method
+    def _ensure(self):
+        if self.window is not None:
+            return
+        from AppKit import (
+            NSScrollView,
+            NSTextView,
+            NSFont,
+            NSMakeSize,
+        )
+        ww, hh = 560, 520
+        self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, ww, hh),
+            NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable,
+            NSBackingStoreBuffered,
+            False,
+        )
+        self.window.setTitle_("Hermes Pong — Claude stream")
+        self.window.setLevel_(NSFloatingWindowLevel)
+        self.window.setReleasedWhenClosed_(False)
+        try:
+            self.window.setBackgroundColor_(
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.08, 0.08, 0.09, 1.0)
+            )
+        except Exception:
+            pass
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, ww, hh))
+        self.statusLabel = lbl(
+            "Live view of what Hermes sent + Claude tmux pane",
+            NSMakeRect(12, hh - 28, ww - 24, 18),
+            size=11,
+            secondary=True,
+        )
+        content.addSubview_(self.statusLabel)
+
+        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(12, 44, ww - 24, hh - 80))
+        scroll.setHasVerticalScroller_(True)
+        scroll.setBorderType_(1)
+        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, ww - 40, hh - 80))
+        tv.setEditable_(False)
+        tv.setRichText_(False)
+        try:
+            tv.setFont_(NSFont.userFixedPitchFontOfSize_(11.0))
+            tv.setTextColor_(NSColor.colorWithCalibratedWhite_alpha_(0.9, 1.0))
+            tv.setBackgroundColor_(NSColor.colorWithCalibratedWhite_alpha_(0.06, 1.0))
+        except Exception:
+            pass
+        scroll.setDocumentView_(tv)
+        self.scroll = scroll
+        self.textView = tv
+        content.addSubview_(scroll)
+        content.addSubview_(btn("Refresh", "refresh:", NSMakeRect(12, 10, 90, 28), self))
+        content.addSubview_(btn("Close", "closeStream:", NSMakeRect(ww - 100, 10, 84, 28), self))
+        self.window.setContentView_(content)
+
+    @python_method
+    def _arm(self):
+        if self.timer:
+            try:
+                self.timer.invalidate()
+            except Exception:
+                pass
+        self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            1.2, self, "refresh:", None, True
+        )
+
+    def refresh_(self, sender):
+        if self.textView is None:
+            return
+        body = claude_stream_text(self.session)
+        self.textView.setString_(body)
+        # scroll to end
+        try:
+            length = len(body)
+            self.textView.scrollRangeToVisible_((length, 0))
+        except Exception:
+            pass
+        if self.statusLabel:
+            self.statusLabel.setStringValue_(
+                f"Live · {time.strftime('%H:%M:%S')} · session {self.session or 'auto'}"
+            )
+
+    def closeStream_(self, sender):
+        if self.timer:
+            try:
+                self.timer.invalidate()
+            except Exception:
+                pass
+            self.timer = None
+        if self.window:
+            self.window.orderOut_(None)
+
+
+def open_claude_stream(session: str | None = None):
+    global _STREAM
+    if _STREAM is None:
+        _STREAM = ClaudeStreamController.alloc().init()
+    _STREAM.open_for_session(session)
 
 
 def show_pair_persist_tip(pair_name: str = "") -> None:
@@ -851,9 +1036,12 @@ class GuideController(NSObject):
         self.titleLabel.setStringValue_(f"Linked · {name}")
         if self.parent:
             self.parent.refreshUI_(None)
-        # Tip about persistence + how Hermes talks to Claude
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "showPairTip:", str(name), False
+        )
+        # Always open stream so you see what Hermes sends even if Claude UI is separate
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "openStreamAfterLink:", str(name), False
         )
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.4, self, "closeGuideTimer:", None, False
@@ -861,6 +1049,9 @@ class GuideController(NSObject):
 
     def showPairTip_(self, name):
         show_pair_persist_tip(str(name) if name else "")
+
+    def openStreamAfterLink_(self, name):
+        open_claude_stream(str(name) if name else None)
 
     def closeGuideTimer_(self, timer):
         self.closeGuide()
@@ -1002,6 +1193,20 @@ class AppDelegate(NSObject):
             )
         )
 
+        y -= 48
+        content.addSubview_(
+            btn("Watch Claude stream", "watchStream:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self)
+        )
+        y -= 24
+        content.addSubview_(
+            lbl(
+                "Live I/O Hermes actually sent (tmux pane + last-sent).",
+                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 20),
+                size=12,
+                secondary=True,
+            )
+        )
+
         y -= 40
         content.addSubview_(
             lbl("ACTIVE PAIRS", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True)
@@ -1064,6 +1269,10 @@ class AppDelegate(NSObject):
         if self.guide is None:
             self.guide = GuideController.alloc().init()
         self.guide.startLinkWithParent_(self)
+
+    def watchStream_(self, sender):
+        pairs = list_pairs()
+        open_claude_stream(pairs[0] if pairs else None)
 
     def frontPair_(self, sender):
         name = sender.identifier()
