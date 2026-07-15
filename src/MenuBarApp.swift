@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 /// Native menu bar for Hermes_Pairing.
-/// Custom bolt icon; blue↔orange glow when any hermes-pair session is active.
+/// Custom bolt; blue↔orange glow when pairs active. Opens control panel on launch.
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
@@ -15,57 +15,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hasActivePair = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if let marker = Bundle.main.resourcePath.map({ $0 + "/project_root" }),
-           let root = try? String(contentsOfFile: marker, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines), !root.isEmpty {
-            projectRoot = root
-        } else {
-            projectRoot = NSString("~/DigitalBrain/Boreal/tools/hermes-claude-app").expandingTildeInPath
-        }
-
+        resolveProjectRoot()
         loadIcons()
-        NSApp.setActivationPolicy(.accessory)
+
+        // Dock + menu bar so double-click always feels like the app "opened"
+        NSApp.setActivationPolicy(.regular)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        guard let button = statusItem.button else { return }
-        button.image = boltTemplate
-        button.image?.isTemplate = true
-        // Fallback text if image missing
-        if button.image == nil {
-            button.title = "⚡"
+        if let button = statusItem.button {
+            if let boltTemplate {
+                button.image = boltTemplate
+                button.image?.isTemplate = true
+            } else {
+                button.title = "⚡"
+            }
+            button.toolTip = "Hermes_Pairing"
+            button.appearsDisabled = false
         }
-        button.toolTip = "Hermes_Pairing"
-        button.appearsDisabled = false
-        // Keep a strong reference so menu bar extra is not deallocated
         statusItem.isVisible = true
         rebuildMenu()
 
-        // Poll sessions + animate glow (main runloop)
         timer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
             self?.tick()
         }
-        RunLoop.main.add(timer!, forMode: .common)
+        if let timer { RunLoop.main.add(timer, forMode: .common) }
 
-        // Defer panel so status item paints first
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.openPanel()
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openPanel()
+        return true
+    }
+
+    private func resolveProjectRoot() {
+        if let marker = Bundle.main.resourcePath.map({ $0 + "/project_root" }),
+           let root = try? String(contentsOfFile: marker, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !root.isEmpty,
+           FileManager.default.fileExists(atPath: root) {
+            projectRoot = root
+            return
+        }
+        projectRoot = NSString("~/DigitalBrain/Boreal/tools/hermes-claude-app").expandingTildeInPath
     }
 
     private func loadIcons() {
         let res = Bundle.main.resourcePath ?? ""
         func img(_ name: String, template: Bool, size: CGFloat = 18) -> NSImage? {
-            let path = res + "/" + name
-            guard let i = NSImage(contentsOfFile: path) else { return nil }
-            i.size = NSSize(width: size, height: size)
-            i.isTemplate = template
-            return i
+            let path = (res as NSString).appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: path),
+                  let i = NSImage(contentsOfFile: path) else { return nil }
+            let copy = i.copy() as! NSImage
+            copy.size = NSSize(width: size, height: size)
+            copy.isTemplate = template
+            return copy
         }
         boltTemplate = img("menubar-template.png", template: true)
         boltBlue = img("bolt-blue.png", template: false)
         boltOrange = img("bolt-orange.png", template: false)
-        // fallback SF Symbol
-        if boltTemplate == nil, let sf = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Zap") {
+        if boltTemplate == nil,
+           let sf = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Zap") {
             sf.isTemplate = true
             boltTemplate = sf
         }
@@ -78,12 +90,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        try? p.run()
+        do { try p.run() } catch { return [] }
         p.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let out = String(data: data, encoding: .utf8) ?? ""
         return out.split(separator: "\n").map(String.init).filter {
-            $0.hasPrefix("hermes-claude") || $0.hasPrefix("hermes-pair")
+            $0 == "hermes-claude" || $0.hasPrefix("hermes-claude-") || $0.hasPrefix("hermes-pair")
         }
     }
 
@@ -94,29 +106,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hasActivePair = active
             rebuildMenu()
         }
-        guard let button = statusItem.button else { return }
+        guard let button = statusItem?.button else { return }
         if active, let blue = boltBlue, let orange = boltOrange {
             glowPhase += 0.06
             if glowPhase > .pi * 2 { glowPhase -= .pi * 2 }
-            // 0...1 sine blend hermes blue → claude orange
             let t = (sin(glowPhase) + 1) / 2
             button.image = blend(blue: blue, orange: orange, t: t)
             button.image?.isTemplate = false
-        } else {
+            button.title = ""
+        } else if let boltTemplate {
             button.image = boltTemplate
             button.image?.isTemplate = true
+            button.title = ""
+        } else {
+            button.title = "⚡"
         }
     }
 
     private func blend(blue: NSImage, orange: NSImage, t: CGFloat) -> NSImage {
         let size = NSSize(width: 18, height: 18)
-        let img = NSImage(size: size, flipped: false) { rect in
+        return NSImage(size: size, flipped: false) { rect in
             blue.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1 - t)
             orange.draw(in: rect, from: .zero, operation: .sourceOver, fraction: t)
             return true
         }
-        img.isTemplate = false
-        return img
     }
 
     private func rebuildMenu() {
@@ -163,36 +176,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func refreshMenu() { rebuildMenu() }
 
     @objc func openPanel() {
-        let py = "\(projectRoot)/venv/bin/python"
-        let scriptInstalled = "/Applications/Hermes_Pairing.app/Contents/Resources/hermes_pairing.py"
-        let script = FileManager.default.fileExists(atPath: scriptInstalled)
-            ? scriptInstalled : "\(projectRoot)/src/hermes_pairing.py"
-        let exe = FileManager.default.isExecutableFile(atPath: py) ? py : "/usr/bin/python3"
-        // avoid stacking many windows
-        let pkill = Process()
-        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        pkill.arguments = ["-f", "hermes_pairing.py --window-only"]
-        try? pkill.run()
-        pkill.waitUntilExit()
+        let candidates = [
+            "/Applications/Hermes_Pairing.app/Contents/Resources/hermes_pairing.py",
+            "\(projectRoot)/src/hermes_pairing.py",
+        ]
+        guard let script = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+            notify("Hermes_Pairing", "Control panel script missing — reinstall the app")
+            return
+        }
+        let pyCandidates = [
+            "\(projectRoot)/venv/bin/python",
+            "\(projectRoot)/venv/bin/python3",
+            "/usr/bin/python3",
+        ]
+        guard let py = pyCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            notify("Hermes_Pairing", "Python not found — run install.sh")
+            return
+        }
+
+        // Don't kill existing healthy panel if already up
+        let check = Process()
+        check.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        check.arguments = ["-f", "hermes_pairing.py"]
+        check.standardOutput = Pipe()
+        check.standardError = FileHandle.nullDevice
+        try? check.run()
+        check.waitUntilExit()
 
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: exe)
+        task.executableURL = URL(fileURLWithPath: py)
         task.arguments = [script, "--window-only"]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
-        try? task.run()
+        do {
+            try task.run()
+            NSApp.activate(ignoringOtherApps: true)
+        } catch {
+            notify("Hermes_Pairing", "Could not open control panel")
+        }
     }
 
     @objc func newPair() {
         let sessions = pairSessions()
-        var n = 1
-        var name = "hermes-pair-1"
-        while sessions.contains(name) || (n == 1 && sessions.contains("hermes-claude")) {
-            n += 1
-            name = "hermes-pair-\(n)"
+        var name = "hermes-claude"
+        if sessions.contains(name) {
+            var n = 1
+            repeat {
+                name = "hermes-pair-\(n)"
+                n += 1
+            } while sessions.contains(name) && n < 50
         }
-        // migrate: first pair can still be hermes-claude for compat
-        if sessions.isEmpty { name = "hermes-claude" }
         runShell("""
         tmux new-session -d -s \(name) -n Hermes
         tmux new-window -t \(name):1 -n Claude
@@ -246,5 +279,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.accessory)
 app.run()

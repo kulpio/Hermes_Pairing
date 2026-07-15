@@ -34,6 +34,7 @@ cp "$ROOT/resources/bolt-blue.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-orange.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-black.png" "$RES/" 2>/dev/null || true
 cp "$SRC_PY" "$RES/hermes_pairing.py"
+chmod 644 "$RES/hermes_pairing.py"
 
 echo "$ROOT" > "$RES/project_root"
 
@@ -61,7 +62,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
-  <true/>
+  <false/>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>

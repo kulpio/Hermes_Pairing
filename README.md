@@ -1,47 +1,67 @@
 # Hermes_Pairing
 
-macOS app that pairs **Hermes** and **Claude Code** in Terminal via tmux.
+Pair **Hermes** and **Claude Code** in Terminal — fast.
 
-Two terminals. One bridge.
+Two terminals. One bridge. As many pairs as you want.
 
-## What it does
+---
 
-| Action | Meaning |
-|--------|---------|
-| **New pair** | Create a fresh Hermes + Claude setup |
-| **Link two open Terminals** | Wire two Terminal windows you already opened |
-| **Rejoin pair** | Bring an existing pair to the front (creates nothing) |
-
-## Requirements
-
-- macOS 12+
-- Python 3.9+ with a local venv (see setup)
-- [tmux](https://github.com/tmux/tmux) (`brew install tmux`)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
-- Hermes (your agent workflow)
-
-## Setup (dev)
+## Install (Mac)
 
 ```bash
-cd Hermes_Pairing   # or this repo root
-python3 -m venv venv
-venv/bin/pip install -U pip
-venv/bin/pip install 'pyobjc-core==10.3.2' 'pyobjc-framework-Cocoa==10.3.2'
+# 1) Clone
+git clone https://github.com/kulpio/Hermes_Pairing.git
+cd Hermes_Pairing
 
-bash scripts/build-app.sh
-bash scripts/install.sh --login   # optional: open at login
+# 2) Install + open
+bash scripts/setup.sh
 ```
 
-App installs to `/Applications/Hermes_Pairing.app`.
+That’s it.
 
-## Day to day
+Optional: open at login
 
 ```bash
-# After code changes: rebuild, reinstall, commit + push
-bash scripts/push-update.sh "Describe the change"
+bash scripts/setup.sh --login
 ```
 
-Or step by step:
+### What you need
+
+- macOS 13+
+- Homebrew (for `tmux` if missing)
+- Xcode Command Line Tools (`xcode-select --install`)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`npm i -g @anthropic-ai/claude-code` then `claude`)
+- Hermes agent for the other pane
+
+---
+
+## Use
+
+| Action | What it does |
+|--------|----------------|
+| **New pair** | Starts a fresh Hermes + Claude pair |
+| **Link two open Terminals** | Connects two Terminal windows you already have |
+| **Rejoin / Front** | Brings that pair’s Terminal to the front |
+| **Kill** | Ends that pair |
+
+- First pair is named `hermes-claude`
+- More pairs: `hermes-pair-1`, `hermes-pair-2`, …
+
+**Menu bar:** dark lightning bolt. Glows blue → orange when a pair is active.  
+**Dock:** Hermes_Pairing (click if the window is hidden).
+
+---
+
+## Update (after you change code)
+
+```bash
+cd Hermes_Pairing
+bash scripts/push-update.sh "what you changed"
+```
+
+Rebuilds, reinstalls, commits, pushes to GitHub.
+
+Or:
 
 ```bash
 bash scripts/build-app.sh
@@ -49,23 +69,35 @@ bash scripts/install.sh
 git add -A && git commit -m "…" && git push
 ```
 
+---
+
+## Uninstall
+
+```bash
+pkill -f Hermes_Pairing || true
+pkill -f hermes_pairing.py || true
+rm -rf /Applications/Hermes_Pairing.app
+```
+
+---
+
+## Dev layout
+
+```
+src/MenuBarApp.swift     # menu bar (native)
+src/hermes_pairing.py    # control panel window
+scripts/setup.sh         # one-shot install
+scripts/build-app.sh
+scripts/install.sh
+scripts/push-update.sh
+resources/               # icons + art
+```
+
 ## Signing
 
-- **Ad-hoc** (free, local): `codesign -s - --force --deep dist/Hermes_Pairing.app`  
-  (already run by `build-app.sh`)
-- **Developer ID** (ship to others): Apple Developer Program + `codesign` with your cert + notarize
-
-## Permissions
-
-Grant when macOS asks:
-
-- **Accessibility** — pick Terminal windows
-- **Automation** — control Terminal / tmux
-
-## Bridge (optional)
-
-`~/bin/claude-delegate.py` can send a task into the Claude tmux pane. The main app focuses on pairing windows.
+Ad-hoc sign runs on every build (local).  
+To ship to other Macs: Apple Developer ID + notarize.
 
 ## License
 
-MIT (or your choice once published).
+MIT
