@@ -287,7 +287,18 @@ def main() -> None:
             print("[bridge] No pair. Use Hermes Pong → New pair or Link first.", file=sys.stderr)
             sys.exit(2)
 
-    print(f"[bridge] mode={mode} session={state.get('session')} claude_window={state.get('claude_window_id')}")
+    auto = state.get("autonomy_level") or "ask_on_done"
+    try:
+        sp = STATE_DIR / "settings.json"
+        if sp.exists():
+            import json as _json
+            auto = _json.loads(sp.read_text()).get("autonomy_level", auto)
+        # prefer per-pair from active-pair
+        auto = state.get("autonomy_level") or auto
+    except Exception:
+        pass
+    print(f"[bridge] mode={mode} session={state.get('session')} claude_window={state.get('claude_window_id')} autonomy={auto}")
+    print(f"[bridge] autonomy meaning: ask_every=pause each reply | ask_on_done=pause on ##CLAUDE_DONE## | full=Hermes keeps going")
 
     if mode == "tmux":
         target = resolve_tmux_target(args.session, args.window)

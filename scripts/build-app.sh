@@ -33,6 +33,7 @@ cp "$ROOT/resources/pair-illustration.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-blue.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-orange.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-black.png" "$RES/" 2>/dev/null || true
+cp "$ROOT/resources/logo.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/logo-monochrome.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/logo-accent.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/logo-mono-128.png" "$RES/" 2>/dev/null || true
@@ -60,6 +61,9 @@ cp "$RES/claude-delegate.py" "$PANEL_RES/" 2>/dev/null || true
 cp "$RES/AppIcon.icns" "$PANEL_RES/" 2>/dev/null || true
 cp "$RES/AppIcon-1024.png" "$PANEL_RES/" 2>/dev/null || true
 cp "$RES/pair-illustration.png" "$PANEL_RES/" 2>/dev/null || true
+cp "$RES/logo.png" "$PANEL_RES/" 2>/dev/null || true
+cp "$RES/logo-accent.png" "$PANEL_RES/" 2>/dev/null || true
+cp "$RES/logo-monochrome.png" "$PANEL_RES/" 2>/dev/null || true
 cp "$RES/project_root" "$PANEL_RES/"
 
 cat > "$PANEL_MACOS/Panel" <<'LAUNCH'

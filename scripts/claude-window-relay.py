@@ -37,8 +37,20 @@ def log(msg: str) -> None:
         pass
 
 
+def _env() -> dict:
+    # GUI-launched processes often lack Homebrew/tmux in PATH
+    env = dict(os.environ)
+    path = env.get("PATH", "")
+    extras = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / "bin")]
+    for e in extras:
+        if e not in path:
+            path = e + ":" + path
+    env["PATH"] = path
+    return env
+
+
 def run(cmd: list[str], input_text: str | None = None) -> str:
-    r = subprocess.run(cmd, input=input_text, capture_output=True, text=True)
+    r = subprocess.run(cmd, input=input_text, capture_output=True, text=True, env=_env())
     return (r.stdout or "").strip()
 
 

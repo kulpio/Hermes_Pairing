@@ -208,6 +208,56 @@
     }
     footer a { color: var(--hermes); text-decoration: none; }
     footer a:hover { text-decoration: underline; }
+
+    /* Light terminal window style */
+    .terminal-pair {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      margin: 24px 0 32px;
+    }
+    .terminal-window {
+      background: #f8f9fa;
+      border-radius: 10px;
+      width: 220px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.1);
+      overflow: hidden;
+      border: 1px solid #ddd;
+    }
+    .terminal-header {
+      background: #e9ecef;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .terminal-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .terminal-dot.red { background: #ff5f56; }
+    .terminal-dot.yellow { background: #ffbd2e; }
+    .terminal-dot.green { background: #27c93f; }
+    .terminal-title {
+      flex: 1;
+      text-align: center;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #333;
+    }
+    .terminal-body {
+      padding: 16px 14px;
+      color: #222;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.95rem;
+      text-align: center;
+    }
+    .arrow {
+      font-size: 1.6rem;
+      color: #888;
+    }
   </style>
 </head>
 <body>
@@ -227,9 +277,31 @@
       model, resume, and context intact.
     </p>
 
-    <!-- Use the existing illustration image -->
-    <div style="text-align:center; margin: 20px 0 32px;">
-      <img src="pair-illustration.png" alt="Hermes and Claude terminal windows" style="max-width: 520px; width: 100%; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.1);">
+    <!-- Light terminal window illustration -->
+    <div class="terminal-pair">
+      <div class="terminal-window">
+        <div class="terminal-header">
+          <div class="terminal-dot red"></div>
+          <div class="terminal-dot yellow"></div>
+          <div class="terminal-dot green"></div>
+          <div class="terminal-title">HERMES-AGENT</div>
+        </div>
+        <div class="terminal-body" style="color:#d97756; font-weight:600;">HERMES-AGENT</div>
+      </div>
+
+      <div class="arrow">↔</div>
+
+      <div class="terminal-window">
+        <div class="terminal-header">
+          <div class="terminal-dot red"></div>
+          <div class="terminal-dot yellow"></div>
+          <div class="terminal-dot green"></div>
+          <div class="terminal-title">Claude</div>
+        </div>
+        <div class="terminal-body" style="color:#2602f1; font-weight:600;">
+          <span style="font-size:1.1rem;">❄︎</span> Claude
+        </div>
+      </div>
     </div>
 
     <div class="pill-row">

@@ -31,11 +31,12 @@ from AppKit import (
     NSFont,
     NSImage,
     NSColor,
-    NSApplicationActivationPolicyRegular,
+    NSApplicationActivationPolicyAccessory,
     NSApplicationActivationPolicyAccessory,
     NSLineBreakByWordWrapping,
     NSBezelStyleRounded,
     NSImageScaleProportionallyUpOrDown,
+    NSTextAlignmentCenter,
     NSImageAlignCenter,
     NSScreen,
     NSBezierPath,
@@ -154,20 +155,36 @@ end tell
 
 
 def list_pairs() -> list[str]:
+    import json
+    # Live tmux sessions
     out = sh("tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
-    names = []
+    live = set()
     for line in out.splitlines():
         s = line.strip()
         if not s:
             continue
-        # Hide view sessions (name-h / name-c); only list base pairs
         if s.endswith("-h") or s.endswith("-c"):
             continue
         if s == "hermes-claude" or s.startswith("hermes-claude-") or s.startswith("hermes-pair"):
-            names.append(s)
-    log(f"list_pairs raw={out!r} filtered={names}")
-    return names
+            live.add(s)
 
+    # Also include saved pairs from pairs.json (important for window-mode links)
+    saved = set()
+    pairs_file = Path.home() / ".hermes-pong" / "pairs.json"
+    if pairs_file.exists():
+        try:
+            db = json.loads(pairs_file.read_text())
+            for k in db.keys():
+                if k.endswith("-h") or k.endswith("-c"):
+                    continue
+                if k == "hermes-claude" or k.startswith("hermes-claude-") or k.startswith("hermes-pair"):
+                    saved.add(k)
+        except Exception:
+            pass
+
+    names = sorted(live | saved)
+    log(f"list_pairs live={sorted(live)} saved={sorted(saved)} -> {names}")
+    return names
 
 def next_pair_name() -> str:
     existing = set(list_pairs())
@@ -406,29 +423,35 @@ def save_pair_state(
     session: str,
     hermes_window_id: str | None = None,
     claude_window_id: str | None = None,
-    claude_mode: str = "tmux",
+    claude_mode: str | None = None,
+    autonomy_level: str | None = None,
 ) -> None:
-    """Persist active pair + per-session window map for Front."""
+    """Persist active pair + per-session window map for Front.
+    Merges with existing entry so autonomy/views are not wiped."""
     import json
 
     state_dir = Path.home() / ".hermes-pong"
     state_dir.mkdir(parents=True, exist_ok=True)
-    data = {
-        "session": session,
-        "hermes_window_id": hermes_window_id,
-        "claude_window_id": claude_window_id,
-        "claude_mode": claude_mode,
-        "updated": time.time(),
-    }
-    (state_dir / "active-pair.json").write_text(json.dumps(data, indent=2))
     db = load_pairs_db()
-    db[session] = {
-        "hermes_window_id": hermes_window_id,
-        "claude_window_id": claude_window_id,
-        "claude_mode": claude_mode,
+    prev = db.get(session, {}) if isinstance(db.get(session), dict) else {}
+
+    entry = {
+        "hermes_window_id": hermes_window_id if hermes_window_id is not None else prev.get("hermes_window_id"),
+        "claude_window_id": claude_window_id if claude_window_id is not None else prev.get("claude_window_id"),
+        "claude_mode": claude_mode if claude_mode is not None else prev.get("claude_mode", "tmux"),
+        "autonomy_level": autonomy_level if autonomy_level is not None else prev.get("autonomy_level", "ask_on_done"),
         "updated": time.time(),
     }
+    # Keep view session names when present
+    for k in ("view_hermes", "view_claude"):
+        if prev.get(k):
+            entry[k] = prev[k]
+
+    db[session] = entry
     (state_dir / "pairs.json").write_text(json.dumps(db, indent=2))
+
+    data = {"session": session, **entry}
+    (state_dir / "active-pair.json").write_text(json.dumps(data, indent=2))
     reply = state_dir / "last-claude.txt"
     if not reply.exists():
         reply.write_text(
@@ -510,11 +533,18 @@ def start_window_relay() -> None:
     if not py.exists():
         py = Path("/usr/bin/python3")
     try:
+        env = dict(os.environ)
+        path = env.get("PATH", "")
+        for e in ("/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / "bin")):
+            if e not in path:
+                path = e + ":" + path
+        env["PATH"] = path
         p = subprocess.Popen(
             [str(py), str(script)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         )
         (Path.home() / ".hermes-pong" / "relay.pid").write_text(str(p.pid))
         log(f"window relay started pid={p.pid}")
@@ -539,26 +569,41 @@ def stop_window_relay() -> None:
 
 
 def kill_pair(name: str):
+    """Kill base + view sessions, clear state, stop relay if needed."""
+    import json
     for s in (name, f"{name}-h", f"{name}-c"):
         sh(f"tmux kill-session -t {s} 2>/dev/null || true")
+
+    state_dir = Path.home() / ".hermes-pong"
+    # Remove from pairs.json
     try:
-        import json
         db = load_pairs_db()
         if name in db:
             del db[name]
-            (Path.home() / ".hermes-pong" / "pairs.json").write_text(json.dumps(db, indent=2))
-    except Exception:
-        pass
-    # If no remaining window-mode pairs, stop relay
+            (state_dir / "pairs.json").write_text(json.dumps(db, indent=2))
+    except Exception as e:
+        log(f"kill pairs.json fail: {e}")
+
+    # Clear active-pair if it points here
     try:
-        import json
-        ap = Path.home() / ".hermes-pong" / "active-pair.json"
+        ap = state_dir / "active-pair.json"
         if ap.exists():
             cur = json.loads(ap.read_text())
             if cur.get("session") == name:
+                ap.write_text(json.dumps({"session": None, "updated": time.time()}, indent=2))
                 stop_window_relay()
+    except Exception as e:
+        log(f"kill active-pair fail: {e}")
+
+    # Stop relay if no remaining window-mode pairs
+    try:
+        db = load_pairs_db()
+        any_window = any(v.get("claude_mode") == "window" for v in db.values() if isinstance(v, dict))
+        if not any_window:
+            stop_window_relay()
     except Exception:
         pass
+
     log(f"killed {name} (+ views)")
 
 
@@ -587,6 +632,24 @@ def load_usage() -> dict:
 def save_usage(data: dict) -> None:
     import json
     p = _usage_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2))
+
+
+def load_settings() -> dict:
+    import json
+    p = Path.home() / ".hermes-pong" / "settings.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return {"autonomy_level": "ask_on_done"}   # default
+
+
+def save_settings(data: dict) -> None:
+    import json
+    p = Path.home() / ".hermes-pong" / "settings.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=2))
 
@@ -1165,7 +1228,7 @@ class AppDelegate(NSObject):
         # Regular so the control window is visible; Dock stays HermesPong main app.
         # Accessory alone sometimes never surfaces the panel window.
         try:
-            NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+            NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
         except Exception:
             pass
 
@@ -1206,21 +1269,72 @@ class AppDelegate(NSObject):
             pass
 
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
-        y = H - PAD
 
+        # Hermes Pong app-icon style logo (top left)
+        # Prefer full AppIcon (rounded tile + bolt) for contrast on dark panel
+        logo_candidates = [
+            Path(__file__).parent / "AppIcon-1024.png",
+            Path(__file__).parent / "logo.png",
+            Path(__file__).parent / "logo-accent.png",
+            Path(__file__).parent / "logo-monochrome.png",
+        ]
+        logoPath = next((str(c) for c in logo_candidates if c.exists()), None)
+        if logoPath:
+            logoImg = NSImage.alloc().initWithContentsOfFile_(logoPath)
+            logoSize = 44
+            logoX = PAD
+            logoY = H - PAD - logoSize + 4
+            # Subtle container so bare bolt logos still read on dark bg
+            container = NSView.alloc().initWithFrame_(
+                NSMakeRect(logoX - 2, logoY - 2, logoSize + 4, logoSize + 4)
+            )
+            try:
+                container.setWantsLayer_(True)
+                container.layer().setCornerRadius_(12)
+                container.layer().setMasksToBounds_(True)
+                # Near-black tile like the Dock app icon
+                container.layer().setBackgroundColor_(
+                    NSColor.colorWithCalibratedRed_green_blue_alpha_(0.08, 0.08, 0.1, 1.0).CGColor()
+                )
+                container.layer().setBorderWidth_(0.5)
+                container.layer().setBorderColor_(
+                    NSColor.colorWithCalibratedRed_green_blue_alpha_(0.25, 0.25, 0.3, 0.9).CGColor()
+                )
+            except Exception:
+                pass
+            logoView = NSImageView.alloc().initWithFrame_(NSMakeRect(2, 2, logoSize, logoSize))
+            logoView.setImage_(logoImg)
+            try:
+                logoView.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+            except Exception:
+                pass
+            try:
+                logoView.setWantsLayer_(True)
+                logoView.layer().setCornerRadius_(10)
+                logoView.layer().setMasksToBounds_(True)
+            except Exception:
+                pass
+            container.addSubview_(logoView)
+            content.addSubview_(container)
+
+        y = H - PAD
         y -= 34
+        titleW = 180
+        titleX = (W - titleW) / 2
         content.addSubview_(
-            lbl("Hermes Pong", NSMakeRect(PAD, y, W - 2 * PAD, 34), bold=True, size=26)
+            lbl("Hermes Pong", NSMakeRect(titleX, y, titleW, 34), bold=True, size=26)
         )
         y -= 24
-        content.addSubview_(
-            lbl(
-                "Hermes Pong — two terminals, one bridge.",
-                NSMakeRect(PAD, y, W - 2 * PAD, 20),
-                size=13,
-                secondary=True,
-            )
-        )
+        # Center subtitle under title
+        subText = "Hermes Pong — two terminals, one bridge."
+        subW = min(W - 2 * PAD, 340)
+        subX = (W - subW) / 2
+        sub = lbl(subText, NSMakeRect(subX, y, subW, 20), size=13, secondary=True)
+        try:
+            sub.setAlignment_(NSTextAlignmentCenter)
+        except Exception:
+            pass
+        content.addSubview_(sub)
 
         y -= 30
         self.statusLabel = lbl("○ Idle", NSMakeRect(PAD, y, W - 2 * PAD, 20), size=13, secondary=True)
@@ -1273,6 +1387,12 @@ class AppDelegate(NSObject):
         content.addSubview_(
             lbl("ACTIVE PAIRS", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True)
         )
+        y -= 16
+        content.addSubview_(lbl("Every = Ask after each reply", NSMakeRect(PAD, y, W - 2 * PAD, 13), size=9, secondary=True))
+        y -= 14
+        content.addSubview_(lbl("Done  = Ask once the task is complete", NSMakeRect(PAD, y, W - 2 * PAD, 13), size=9, secondary=True))
+        y -= 14
+        content.addSubview_(lbl("Full   = Minimal human interventions", NSMakeRect(PAD, y, W - 2 * PAD, 13), size=9, secondary=True))
 
         y -= 200
         self.listContainer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, W - 2 * PAD, 190))
@@ -1300,16 +1420,196 @@ class AppDelegate(NSObject):
         y = 150
         for name in pairs:
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, y - 8, W - 2 * PAD, 44))
-            row.addSubview_(lbl(f"●  {name}", NSMakeRect(0, 12, 200, 20), bold=True, size=13))
-            b1 = btn("Front", "frontPair:", NSMakeRect(210, 6, 70, 30), self)
-            b2 = btn("Kill", "killPair:", NSMakeRect(288, 6, 70, 30), self)
-            b1.setIdentifier_(name)
-            b2.setIdentifier_(name)
-            row.addSubview_(b1)
-            row.addSubview_(b2)
+            row.addSubview_(lbl(f"●  {name}", NSMakeRect(0, 12, 170, 20), bold=True, size=13))
+
+            b1 = btn("Front", "frontPair:", NSMakeRect(175, 6, 55, 28), self)
+            b2 = btn("Kill", "killPair:", NSMakeRect(234, 6, 55, 28), self)
+
+            # Autonomy button that shows an alert with 3 choices
+            entry = load_pairs_db().get(name, {})
+            current = entry.get("autonomy_level", "ask_on_done")
+            label_map = {
+                "ask_every": "Every",
+                "ask_on_done": "Done",
+                "full": "Full"
+            }
+            auto_label = label_map.get(current, "Done")
+            b_auto = btn(auto_label, "showAutonomyAlert:", NSMakeRect(310, 6, 65, 28), self)
+
+            # CRITICAL: all three buttons need the pair name
+            for b in (b1, b2, b_auto):
+                b.setIdentifier_(name)
+                row.addSubview_(b)
+
             self.listContainer.addSubview_(row)
-            self.pair_buttons.append((b1, b2, name))
+            self.pair_buttons.append((b1, b2, b_auto, name))
             y -= 48
+
+    
+    def setAutonomyAskEvery_(self, sender):
+        data = load_settings()
+        data["autonomy_level"] = "ask_every"
+        save_settings(data)
+        log("Autonomy set to: ask_every")
+
+    def setAutonomyAskOnDone_(self, sender):
+        data = load_settings()
+        data["autonomy_level"] = "ask_on_done"
+        save_settings(data)
+        log("Autonomy set to: ask_on_done")
+
+    def setAutonomyFull_(self, sender):
+        data = load_settings()
+        data["autonomy_level"] = "full"
+        save_settings(data)
+        log("Autonomy set to: full")
+
+    
+    def cycleAutonomy_(self, sender):
+        name = sender.identifier()
+        if not name:
+            return
+        entry = load_pairs_db().get(name, {})
+        current = entry.get("autonomy_level", "ask_on_done")
+        order = ["ask_on_done", "ask_every", "full"]
+        try:
+            idx = order.index(current)
+        except ValueError:
+            idx = 0
+        new_level = order[(idx + 1) % len(order)]
+        save_pair_state(name,
+            hermes_window_id=entry.get("hermes_window_id"),
+            claude_window_id=entry.get("claude_window_id"),
+            claude_mode=entry.get("claude_mode", "tmux"),
+            autonomy_level=new_level)
+        self.refreshUI_(None)
+
+    def showAutonomyMenu_(self, sender):
+        name = sender.identifier()
+        if not name:
+            return
+        entry = load_pairs_db().get(name, {})
+        current = entry.get("autonomy_level", "ask_on_done")
+
+        menu = NSMenu.alloc().initWithTitle_("Autonomy")
+        for level, title in [
+            ("ask_every", "Ask every time"),
+            ("ask_on_done", "Ask when done"),
+            ("full", "Full autonomy"),
+        ]:
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "selectAutonomyLevel:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_({"name": name, "level": level})
+            if level == current:
+                item.setState_(NSControlStateValueOn)
+            menu.addItem_(item)
+
+        # Show menu under the button
+        event = NSApplication.sharedApplication().currentEvent()
+        NSMenu.popUpContextMenu_withEvent_forView_(menu, event, sender)
+    def selectAutonomyLevel_(self, sender):
+        info = sender.representedObject()
+        if not info:
+            return
+        name = info["name"]
+        level = info["level"]
+        entry = load_pairs_db().get(name, {})
+        save_pair_state(name,
+            hermes_window_id=entry.get("hermes_window_id"),
+            claude_window_id=entry.get("claude_window_id"),
+            claude_mode=entry.get("claude_mode", "tmux"),
+            autonomy_level=level)
+        self.refreshUI_(None)
+
+    
+    def cycleAutonomy_(self, sender):
+        name = sender.identifier()
+        if not name:
+            return
+        entry = load_pairs_db().get(name, {})
+        current = entry.get("autonomy_level", "ask_on_done")
+        order = ["ask_on_done", "ask_every", "full"]
+        try:
+            idx = order.index(current)
+        except ValueError:
+            idx = 0
+        new_level = order[(idx + 1) % len(order)]
+        save_pair_state(name,
+            hermes_window_id=entry.get("hermes_window_id"),
+            claude_window_id=entry.get("claude_window_id"),
+            claude_mode=entry.get("claude_mode", "tmux"),
+            autonomy_level=new_level)
+        self.refreshUI_(None)
+
+    
+    def cycleAutonomy_(self, sender):
+        name = sender.identifier()
+        if not name:
+            return
+        entry = load_pairs_db().get(name, {})
+        current = entry.get("autonomy_level", "ask_on_done")
+        order = ["ask_on_done", "ask_every", "full"]
+        try:
+            idx = order.index(current)
+        except ValueError:
+            idx = 0
+        new_level = order[(idx + 1) % len(order)]
+        save_pair_state(name,
+            hermes_window_id=entry.get("hermes_window_id"),
+            claude_window_id=entry.get("claude_window_id"),
+            claude_mode=entry.get("claude_mode", "tmux"),
+            autonomy_level=new_level)
+        self.refreshUI_(None)
+
+    
+    def showAutonomyAlert_(self, sender):
+        name = sender.identifier()
+        if not name:
+            return
+
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"Autonomy for {name}")
+        alert.setInformativeText_(
+            "Every: Hermes asks you after each Claude reply.\n"
+            "Done: Hermes asks you after Claude prints ##CLAUDE_DONE##.\n"
+            "Full: Hermes keeps looping with minimal interruptions.\n\n"
+            "This is a preference Hermes should follow — not a second agent."
+        )
+        alert.addButtonWithTitle_("Every")
+        alert.addButtonWithTitle_("Done")
+        alert.addButtonWithTitle_("Full")
+        alert.addButtonWithTitle_("Cancel")
+
+        response = alert.runModal()
+        # NSAlert returns 1000, 1001, 1002, 1003 for buttons 1..4
+        first = int(NSAlertFirstButtonReturn)
+        level_map = {
+            first: "ask_every",
+            first + 1: "ask_on_done",
+            first + 2: "full",
+        }
+        level = level_map.get(int(response))
+        if not level:
+            log(f"autonomy alert cancelled/unknown response={response}")
+            return
+
+        entry = load_pairs_db().get(name, {})
+        save_pair_state(
+            name,
+            hermes_window_id=entry.get("hermes_window_id"),
+            claude_window_id=entry.get("claude_window_id"),
+            claude_mode=entry.get("claude_mode", "tmux"),
+            autonomy_level=level,
+        )
+        # Keep global settings in sync for older readers
+        try:
+            data = load_settings()
+            data["autonomy_level"] = level
+            save_settings(data)
+        except Exception:
+            pass
+        log(f"autonomy {name} -> {level}")
+        self.refreshUI_(None)
 
     def startFresh_(self, sender):
         def work():
