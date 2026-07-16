@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://kulpio.github.io/Hermes_Pairing/">Website</a> ·
-  <a href="https://github.com/kulpio/Hermes_Pairing/releases/latest">Download</a> ·
+  <a href="https://kulpio.github.io/Hermes-Pong/">Website</a> ·
+  <a href="https://github.com/kulpio/Hermes-Pong/releases/latest">Download</a> ·
   <a href="#install-macos">Install</a>
 </p>
 
@@ -50,16 +50,16 @@ Hermes sends a task into your **live Claude Code terminal** (paste + Enter). You
 
 ### Option A — release zip
 
-1. Open the [latest release](https://github.com/kulpio/Hermes_Pairing/releases/latest)
-2. Download **HermesPong-macOS.zip** (or from the [landing page](https://kulpio.github.io/Hermes_Pairing/))
+1. Open the [latest release](https://github.com/kulpio/Hermes-Pong/releases/latest)
+2. Download **HermesPong-macOS.zip** (or from the [landing page](https://kulpio.github.io/Hermes-Pong/))
 3. Unzip → drag **Hermes Pong** into **Applications**
 4. First open: right-click → **Open** if Gatekeeper warns (ad-hoc signed for now)
 
 ### Option B — from source
 
 ```bash
-git clone https://github.com/kulpio/Hermes_Pairing.git
-cd Hermes_Pairing
+git clone https://github.com/kulpio/Hermes-Pong.git
+cd Hermes-Pong
 bash scripts/setup.sh
 ```
 
@@ -156,7 +156,7 @@ Allow **Terminal** (and related tools you use to run the bridge).
 
 Pay what you want (including **$0**):
 
-**https://kulpio.github.io/Hermes_Pairing/**
+**https://kulpio.github.io/Hermes-Pong/**
 
 ---
 

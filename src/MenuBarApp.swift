@@ -72,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func showAbout() {
         let alert = NSAlert()
         alert.messageText = "Hermes Pong"
-        alert.informativeText = "Pair Hermes + Claude Code in Terminal.\nkulpio/Hermes_Pairing"
+        alert.informativeText = "Pair Hermes + Claude Code in Terminal.\nkulpio/Hermes-Pong"
         alert.runModal()
     }
 

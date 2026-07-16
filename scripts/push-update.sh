@@ -1,11 +1,11 @@
 #!/bin/bash
-# Build, install, commit, and push Hermes_Pairing updates to GitHub
+# Build, install, commit, and push Hermes Pong updates to GitHub
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-MSG="${*:-Update Hermes_Pairing}"
+MSG="${*:-Update Hermes Pong}"
 
 bash "$ROOT/scripts/build-app.sh"
 bash "$ROOT/scripts/install.sh"

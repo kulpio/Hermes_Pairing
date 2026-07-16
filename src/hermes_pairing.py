@@ -687,7 +687,7 @@ def mark_supporter(paid_cents: int = 200) -> None:
 TIP_URL_2 = "https://donate.stripe.com/eVqeVdgFp8V22cj7pR1B606"
 TIP_URL_5 = "https://donate.stripe.com/6oU14ndtdefmaIP39B1B607"
 TIP_URL_CUSTOM = "https://donate.stripe.com/5kQfZhgFpfjq6szdOf1B608"
-LANDING_URL = "https://kulpio.github.io/Hermes_Pairing/"
+LANDING_URL = "https://kulpio.github.io/Hermes-Pong/"
 
 
 def maybe_show_tip_prompt() -> None:
