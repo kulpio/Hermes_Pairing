@@ -10,7 +10,16 @@
     "20": "https://donate.stripe.com/fZufZhbl58V2cQX9xZ1B60a",
     "100": "https://donate.stripe.com/00wfZh3SD8V2g399xZ1B60b"
   },
-  "notes": "Each tip price uses custom_unit_amount (preset shown, min $1) so checkout can change amount.",
+  "notes": "Each tip price uses custom_unit_amount (preset shown, min $1). Checkout requires first name (custom field) + email (customer_creation=always).",
   "free_download": "https://github.com/kulpio/Hermes-Pong/releases/latest/download/HermesPong-macOS.zip",
-  "release": "https://github.com/kulpio/Hermes-Pong/releases/latest"
+  "release": "https://github.com/kulpio/Hermes-Pong/releases/latest",
+  "checkout_collects": [
+    "email",
+    "first_name"
+  ],
+  "payment_link_ids": {
+    "10": "plink_1TtvaOGytTJoxfIsDNNTsslg",
+    "20": "plink_1TtvaQGytTJoxfIsfOr9gcTc",
+    "100": "plink_1TtvaSGytTJoxfIsYZ85oVcP"
+  }
 }
