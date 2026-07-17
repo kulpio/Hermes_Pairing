@@ -107,13 +107,34 @@ enum PairState {
         return "hermes-pair-\(Int(Date().timeIntervalSince1970) % 10000)"
     }
 
+    /// Default per-pair access constraints (bans + freeform note).
+    /// Checked boxes mean "ban this". Injected into Claude via claude-delegate.
+    static func defaultPermissions() -> [String: Any] {
+        [
+            "ban_mcp": false,
+            "ban_root": false,
+            "ban_network": false,
+            "ban_system_paths": false,
+            "repo_only": false,
+            "custom_prompt": "",
+        ]
+    }
+
+    static func permissions(for session: String) -> [String: Any] {
+        let prev = (loadPairsDb()[session] as? [String: Any])?["permissions"] as? [String: Any] ?? [:]
+        var merged = defaultPermissions()
+        for (k, v) in prev { merged[k] = v }
+        return merged
+    }
+
     /// Persist active pair + per-session map. Merges with the existing entry so
-    /// views are not wiped. v1.3: autonomy is always "full" — the verdict loop
-    /// runs until accept or escalate; there are no ask-modes anymore.
+    /// views / permissions are not wiped. v1.3: autonomy is always "full" — the
+    /// verdict loop runs until accept or escalate; there are no ask-modes anymore.
     static func savePairState(_ session: String,
                               hermesWindowId: String? = nil,
                               claudeWindowId: String? = nil,
-                              claudeMode: String? = nil) {
+                              claudeMode: String? = nil,
+                              permissions: [String: Any]? = nil) {
         var db = loadPairsDb()
         let prev = db[session] as? [String: Any] ?? [:]
         var entry: [String: Any] = [
@@ -125,6 +146,13 @@ enum PairState {
         ]
         for k in ["view_hermes", "view_claude"] {
             if let v = prev[k] { entry[k] = v }
+        }
+        if let permissions {
+            entry["permissions"] = permissions
+        } else if let p = prev["permissions"] {
+            entry["permissions"] = p
+        } else {
+            entry["permissions"] = defaultPermissions()
         }
         db[session] = entry
         Pong.writeJSON(pairsPath, db)
@@ -945,6 +973,9 @@ final class PanelController: NSObject {
         y -= 16
         content.addSubview(Self.label("Hermes verifies every CLAIM and loops until accept or escalate.",
             frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 13), size: 9, secondary: true))
+        y -= 14
+        content.addSubview(Self.label("Perms = per-pair access bans + note, injected on every handoff.",
+            frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 13), size: 9, secondary: true))
 
         y -= 228
         listContainer = NSView(frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 190))
@@ -980,11 +1011,19 @@ final class PanelController: NSObject {
         for name in pairs {
             let row = NSView(frame: NSRect(x: 0, y: y - 8, width: W - 2 * PAD, height: 44))
             row.addSubview(Self.label("●  \(name)",
-                frame: NSRect(x: 0, y: 12, width: 230, height: 20), bold: true, size: 13))
+                frame: NSRect(x: 0, y: 12, width: 150, height: 20), bold: true, size: 13))
             row.addSubview(button("Front", #selector(frontPressed(_:)),
-                NSRect(x: 240, y: 6, width: 65, height: 28), id: name))
+                NSRect(x: 155, y: 6, width: 55, height: 28), id: name))
             row.addSubview(button("Kill", #selector(killPressed(_:)),
-                NSRect(x: 310, y: 6, width: 65, height: 28), id: name))
+                NSRect(x: 214, y: 6, width: 55, height: 28), id: name))
+            // Per-pair access bans + freeform note (sheet). Label shows count if any ban on.
+            let perms = PairState.permissions(for: name)
+            let onCount = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only"]
+                .filter { (perms[$0] as? Bool) == true }.count
+            let noteOn = !((perms["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let permsTitle = (onCount > 0 || noteOn) ? "Perms·\(onCount + (noteOn ? 1 : 0))" : "Perms"
+            row.addSubview(button(permsTitle, #selector(permsPressed(_:)),
+                NSRect(x: 273, y: 6, width: 90, height: 28), id: name))
             listContainer.addSubview(row)
             y -= 48
         }
@@ -1019,6 +1058,13 @@ final class PanelController: NSObject {
         refreshUI()
     }
 
+    @objc private func permsPressed(_ sender: NSButton) {
+        guard let name = sender.identifier?.rawValue else { return }
+        PermissionsSheetController.shared.show(for: name) { [weak self] in
+            self?.refreshUI()
+        }
+    }
+
     @objc private func refreshPressed(_ sender: NSButton) { refreshUI() }
 
     @objc private func closePressed(_ sender: NSButton) {
@@ -1045,6 +1091,171 @@ final class PanelController: NSObject {
             try? "1\n".write(toFile: flag, atomically: true, encoding: .utf8)
             Pong.log("dont-remind-pair-persist set")
         }
+    }
+}
+
+// MARK: - Per-pair access permissions sheet
+
+/// Modal sheet: tick ban boxes + freeform prompt. Stored on the pair in pairs.json
+/// and mirrored into active-pair.json so claude-delegate can inject constraints.
+final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDelegate {
+    static let shared = PermissionsSheetController()
+
+    private var window: NSWindow?
+    private var pairName = ""
+    private var onSaved: (() -> Void)?
+    private var boxes: [String: NSButton] = [:]
+    private var noteView: NSTextView!
+
+    private let keys: [(String, String)] = [
+        ("ban_mcp", "Ban MCP tools / external tool servers"),
+        ("ban_root", "Ban root / outside-project writes"),
+        ("repo_only", "Repo-only (stay inside the project tree)"),
+        ("ban_network", "Ban network installs / outbound fetches"),
+        ("ban_system_paths", "Ban system paths (~/.ssh, /etc, keychains)"),
+    ]
+
+    func show(for name: String, onSaved: @escaping () -> Void) {
+        self.pairName = name
+        self.onSaved = onSaved
+        if window == nil { buildWindow() }
+        loadIntoUI()
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.center()
+    }
+
+    private func buildWindow() {
+        let W: CGFloat = 440, H: CGFloat = 460
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: W, height: H),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false)
+        win.title = "Pair permissions"
+        win.isReleasedWhenClosed = false
+        win.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.07, blue: 0.08, alpha: 1.0)
+        win.delegate = self
+        win.level = .floating
+
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        let PAD: CGFloat = 22
+        var y = H - PAD - 8
+
+        let title = NSTextField(labelWithString: "Access for this pair")
+        title.font = .boldSystemFont(ofSize: 16)
+        title.frame = NSRect(x: PAD, y: y - 20, width: W - 2 * PAD, height: 22)
+        content.addSubview(title)
+        y -= 28
+
+        let sub = NSTextField(wrappingLabelWithString:
+            "Checked boxes ban that access for Claude on every handoff. Optional note explains or tightens further.")
+        sub.font = .systemFont(ofSize: 12)
+        sub.textColor = .secondaryLabelColor
+        sub.frame = NSRect(x: PAD, y: y - 40, width: W - 2 * PAD, height: 40)
+        content.addSubview(sub)
+        y -= 52
+
+        boxes.removeAll()
+        for (key, label) in keys {
+            let b = NSButton(checkboxWithTitle: label, target: nil, action: nil)
+            b.frame = NSRect(x: PAD, y: y - 24, width: W - 2 * PAD, height: 24)
+            b.font = .systemFont(ofSize: 13)
+            content.addSubview(b)
+            boxes[key] = b
+            y -= 28
+        }
+
+        y -= 8
+        let noteLbl = NSTextField(labelWithString: "Extra note (injected into Claude)")
+        noteLbl.font = .systemFont(ofSize: 11)
+        noteLbl.textColor = .secondaryLabelColor
+        noteLbl.frame = NSRect(x: PAD, y: y - 16, width: W - 2 * PAD, height: 16)
+        content.addSubview(noteLbl)
+        y -= 22
+
+        let scrollH: CGFloat = 110
+        let scroll = NSScrollView(frame: NSRect(x: PAD, y: y - scrollH, width: W - 2 * PAD, height: scrollH))
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.drawsBackground = true
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: scroll.contentSize.width, height: scrollH))
+        tv.isRichText = false
+        tv.font = .systemFont(ofSize: 13)
+        tv.isEditable = true
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.string = ""
+        tv.delegate = self
+        scroll.documentView = tv
+        content.addSubview(scroll)
+        noteView = tv
+        y -= scrollH + 18
+
+        let save = NSButton(frame: NSRect(x: W - PAD - 100, y: 18, width: 100, height: 32))
+        save.title = "Save"
+        save.bezelStyle = .rounded
+        save.keyEquivalent = "\r"
+        save.target = self
+        save.action = #selector(savePressed)
+        content.addSubview(save)
+
+        let cancel = NSButton(frame: NSRect(x: W - PAD - 210, y: 18, width: 100, height: 32))
+        cancel.title = "Cancel"
+        cancel.bezelStyle = .rounded
+        cancel.keyEquivalent = "\u{1b}"
+        cancel.target = self
+        cancel.action = #selector(cancelPressed)
+        content.addSubview(cancel)
+
+        let clear = NSButton(frame: NSRect(x: PAD, y: 18, width: 90, height: 32))
+        clear.title = "Clear all"
+        clear.bezelStyle = .rounded
+        clear.target = self
+        clear.action = #selector(clearPressed)
+        content.addSubview(clear)
+
+        win.contentView = content
+        window = win
+    }
+
+    private func loadIntoUI() {
+        window?.title = "Permissions · \(pairName)"
+        let perms = PairState.permissions(for: pairName)
+        for (key, box) in boxes {
+            box.state = ((perms[key] as? Bool) == true) ? .on : .off
+        }
+        noteView?.string = (perms["custom_prompt"] as? String) ?? ""
+    }
+
+    @objc private func clearPressed() {
+        for box in boxes.values { box.state = .off }
+        noteView?.string = ""
+    }
+
+    @objc private func cancelPressed() {
+        window?.orderOut(nil)
+    }
+
+    @objc private func savePressed() {
+        var perms = PairState.defaultPermissions()
+        for (key, box) in boxes {
+            perms[key] = (box.state == .on)
+        }
+        perms["custom_prompt"] = noteView?.string ?? ""
+        let prev = PairState.loadPairsDb()[pairName] as? [String: Any] ?? [:]
+        PairState.savePairState(
+            pairName,
+            hermesWindowId: prev["hermes_window_id"] as? String,
+            claudeWindowId: prev["claude_window_id"] as? String,
+            claudeMode: prev["claude_mode"] as? String,
+            permissions: perms
+        )
+        Pong.log("permissions \(pairName) -> \(perms)")
+        window?.orderOut(nil)
+        onSaved?()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // no-op; isReleasedWhenClosed = false
     }
 }
 

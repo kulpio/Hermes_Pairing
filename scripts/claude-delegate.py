@@ -51,8 +51,60 @@ def extract_acceptance(text: str) -> str:
     return "\n".join(out).strip()
 
 
-def build_prompt(text: str, criteria_path: str | None = None, claim: bool = False) -> str:
-    """v1.3 prompt assembly. Without criteria/claim this is byte-for-byte v1.2."""
+def load_pair_permissions(state: dict) -> dict:
+    """Permissions from active-pair, falling back to pairs.json for the session."""
+    perms = state.get("permissions")
+    if isinstance(perms, dict) and perms:
+        return perms
+    session = state.get("session")
+    if not session:
+        return {}
+    pairs_path = STATE_DIR / "pairs.json"
+    if not pairs_path.exists():
+        return {}
+    try:
+        db = json.loads(pairs_path.read_text())
+        entry = db.get(session) or {}
+        p = entry.get("permissions")
+        return p if isinstance(p, dict) else {}
+    except Exception:
+        return {}
+
+
+def format_permissions_block(state: dict) -> str:
+    """Hard access constraints the user set on this pair (bans + freeform note)."""
+    perms = load_pair_permissions(state)
+    if not perms:
+        return ""
+    lines: list[str] = []
+    if perms.get("ban_mcp"):
+        lines.append("- Do NOT use MCP tools or external tool servers.")
+    if perms.get("ban_root"):
+        lines.append("- Do NOT write outside the project / working tree. No sudo or root-owned paths.")
+    if perms.get("repo_only"):
+        lines.append("- Stay inside the project repository only. No edits or reads outside that tree unless required to run project tools.")
+    if perms.get("ban_network"):
+        lines.append("- Do NOT install packages from the network or make outbound fetches unless the task explicitly requires it.")
+    if perms.get("ban_system_paths"):
+        lines.append("- Do NOT read or write system paths (~/.ssh, /etc, keychains, browser profiles, credentials stores).")
+    custom = str(perms.get("custom_prompt") or "").strip()
+    if custom:
+        lines.append(f"- Additional constraints from the user:\n{custom}")
+    if not lines:
+        return ""
+    return (
+        "\n\nPAIR ACCESS CONSTRAINTS (hard rules for this pair — obey):\n"
+        + "\n".join(lines)
+    )
+
+
+def build_prompt(
+    text: str,
+    criteria_path: str | None = None,
+    claim: bool = False,
+    state: dict | None = None,
+) -> str:
+    """v1.3 prompt assembly. Without criteria/claim/permissions this is v1.2-compatible."""
     prompt = text
     use_claim = claim or bool(criteria_path)
     if criteria_path:
@@ -65,6 +117,8 @@ def build_prompt(text: str, criteria_path: str | None = None, claim: bool = Fals
             )
         else:
             print(f"[bridge] no '## Acceptance' section in {criteria_path}", file=sys.stderr)
+    if state:
+        prompt = prompt.rstrip() + format_permissions_block(state)
     if use_claim:
         return prompt.rstrip() + CLAIM_INSTRUCTION
     if MARKER not in prompt:
@@ -338,13 +392,18 @@ def main() -> None:
         )
         sys.exit(1)
 
+    state = load_state()
     try:
-        prompt = build_prompt(" ".join(args.prompt), criteria_path=args.criteria, claim=args.claim)
+        prompt = build_prompt(
+            " ".join(args.prompt),
+            criteria_path=args.criteria,
+            claim=args.claim,
+            state=state,
+        )
     except OSError as e:
         print(f"[bridge] cannot read --criteria file: {e}", file=sys.stderr)
         sys.exit(1)
 
-    state = load_state()
     mode = args.mode
     if mode == "auto":
         if state.get("claude_mode") == "window" and state.get("claude_window_id"):
@@ -362,6 +421,8 @@ def main() -> None:
     auto = state.get("autonomy_level") or "full"
     print(f"[bridge] mode={mode} session={state.get('session')} claude_window={state.get('claude_window_id')} autonomy={auto}")
     print("[bridge] verdict loop: Hermes verifies each CLAIM and loops until accept or escalate")
+    if format_permissions_block(state):
+        print("[bridge] pair access constraints injected from pair permissions")
 
     if mode == "tmux":
         target = resolve_tmux_target(args.session, args.window)

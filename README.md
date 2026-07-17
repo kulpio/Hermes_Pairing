@@ -145,6 +145,7 @@ The loop always runs — there are no supervision modes to configure. It works s
 | **Link existing terminals** | Pair open Hermes + Claude (keeps Claude context) |
 | **Front** | Bring that pair’s windows forward |
 | **Kill** | End the pair |
+| **Perms** | Per-pair access bans + note (MCPs, root, network, system paths, freeform). Injected into every Claude handoff. |
 
 The menu bar bolt glows while a pair is active and shows the verdict ledger (rounds, accept rate, reject streak, last verdict).
 
