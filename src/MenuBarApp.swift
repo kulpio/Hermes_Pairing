@@ -301,7 +301,110 @@ enum Workers {
             "cmd": cmd,
             "tmux_index": tmuxIndex,
             "done_marker": type == "claude" ? "##CLAUDE_DONE##" : "##WORKER_DONE##",
+            "permissions": PairState.defaultPermissions(),
         ]
+    }
+
+    static func permissions(pair: String, workerId: String) -> [String: Any] {
+        let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
+        let ws = list(from: entry)
+        if let w = ws.first(where: { ($0["id"] as? String) == workerId }),
+           let p = w["permissions"] as? [String: Any] {
+            var merged = PairState.defaultPermissions()
+            for (k, v) in p { merged[k] = v }
+            return merged
+        }
+        // fall back to pair-level permissions
+        return PairState.permissions(for: pair)
+    }
+
+    static func setPermissions(pair: String, workerId: String, permissions: [String: Any]) {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        var ws = list(from: entry)
+        guard let idx = ws.firstIndex(where: { ($0["id"] as? String) == workerId }) else { return }
+        ws[idx]["permissions"] = permissions
+        entry["workers"] = ws
+        // if only one worker / primary, keep pair-level in sync for bridge default
+        if idx == 0 { entry["permissions"] = permissions }
+        entry["updated"] = Date().timeIntervalSince1970
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        var active = Pong.loadJSON(PairState.activePath)
+        if active["session"] as? String == pair {
+            active["workers"] = ws
+            if idx == 0 { active["permissions"] = permissions }
+            active["updated"] = Date().timeIntervalSince1970
+            Pong.writeJSON(PairState.activePath, active)
+        }
+        Pong.log("worker perms \(pair)/\(workerId)")
+    }
+
+    /// Remove one worker from the team; kill its view session. Pair stays if workers remain.
+    @discardableResult
+    static func removeWorker(pair: String, workerId: String) -> Bool {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        var ws = list(from: entry)
+        guard let idx = ws.firstIndex(where: { ($0["id"] as? String) == workerId }) else { return false }
+        let removed = ws.remove(at: idx)
+        // kill view session name-w(index) if known
+        if let ti = removed["tmux_index"] as? Int {
+            let view = "\(pair)-w\(ti - 1)"
+            Pong.sh("tmux kill-session -t \(view) 2>/dev/null || true")
+            // kill pane/window in base if possible
+            Pong.sh("tmux kill-window -t \(pair):\(ti) 2>/dev/null || true")
+        }
+        if ws.isEmpty {
+            // last worker gone → kill whole pair
+            Pairing.killPair(pair)
+            return true
+        }
+        // reindex ids optional — keep stable w1/w2 ids
+        entry["workers"] = ws
+        if let first = ws.first {
+            entry["claude_window_id"] = first["window_id"] ?? NSNull()
+            entry["worker_window_id"] = first["window_id"] ?? NSNull()
+            entry["worker_type"] = first["type"] ?? "linked"
+            entry["worker_label"] = first["label"] ?? "Worker"
+            entry["worker_cmd"] = first["cmd"] ?? ""
+            entry["claude_mode"] = first["mode"] ?? "tmux"
+        }
+        entry["updated"] = Date().timeIntervalSince1970
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        var active = Pong.loadJSON(PairState.activePath)
+        if active["session"] as? String == pair {
+            active["workers"] = ws
+            active["updated"] = Date().timeIntervalSince1970
+            Pong.writeJSON(PairState.activePath, active)
+        }
+        Pong.log("removed worker \(pair)/\(workerId) remaining=\(ws.count)")
+        return true
+    }
+
+    static func frontWorker(pair: String, workerId: String) {
+        let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
+        let ws = list(from: entry)
+        guard let w = ws.first(where: { ($0["id"] as? String) == workerId }) else { return }
+        let wid = "\(w["window_id"] ?? "")"
+        if Int(wid) != nil {
+            Pairing.flashPairWindows(wid, nil)
+            return
+        }
+        // fallback: attach view
+        if let ti = w["tmux_index"] as? Int {
+            let view = "\(pair)-w\(ti - 1)"
+            Pong.sh("tmux has-session -t \(view) 2>/dev/null && open -a Terminal && tmux attach -t \(view) || true")
+            Pong.osascript("""
+            tell application "Terminal"
+              activate
+              try
+                do script "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; tmux attach-session -t \(view)"
+              end try
+            end tell
+            """)
+        }
     }
 }
 
@@ -1513,11 +1616,11 @@ final class PanelController: NSObject {
         content.addSubview(Self.label("Hermes verifies every CLAIM and loops until accept or escalate.",
             frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 13), size: 9, secondary: true))
         y -= 14
-        content.addSubview(Self.label("Perms = per-pair access bans + note, injected on every handoff.",
+        content.addSubview(Self.label("Tree: Hermes → each worker. Front/Kill/Perms on Hermes or per worker.",
             frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 13), size: 9, secondary: true))
 
-        y -= 228
-        listContainer = NSView(frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 190))
+        y -= 250
+        listContainer = NSView(frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 220))
         content.addSubview(listContainer)
 
         let half = (W - 2 * PAD - 12) / 2
@@ -1541,57 +1644,74 @@ final class PanelController: NSObject {
     private func rebuildList(_ pairs: [String]) {
         guard let listContainer else { return }
         listContainer.subviews.forEach { $0.removeFromSuperview() }
+        let boxW = W - 2 * PAD
         if pairs.isEmpty {
             listContainer.addSubview(Self.label("No pairs yet — use New pair.",
-                frame: NSRect(x: 0, y: 150, width: W - 2 * PAD, height: 20), size: 12, secondary: true))
+                frame: NSRect(x: 0, y: 150, width: boxW, height: 20), size: 12, secondary: true))
             return
         }
-        var y: CGFloat = 150
+        // Lay out from top of list container (y down in flipped coords? AppKit: y grows up.
+        // Existing code used y starting 150 and subtracting — keep same convention.
+        var y: CGFloat = 160
         let db = PairState.loadPairsDb()
         for name in pairs {
             let entry = db[name] as? [String: Any] ?? [:]
-            let ws = Workers.list(from: entry)
-            // One row per Hermes pair (not per worker).
-            let head = "●  \(name)"
-            let sub: String = {
-                if ws.isEmpty {
-                    let legacy = (entry["worker_label"] as? String) ?? "worker"
-                    return "   Hermes → \(legacy)"
-                }
-                if ws.count == 1 {
-                    let lab = (ws[0]["label"] as? String) ?? "worker"
-                    let id = (ws[0]["id"] as? String) ?? "w1"
-                    return "   Hermes → \(id) \(lab)"
-                }
-                let parts = ws.map { w -> String in
-                    let id = (w["id"] as? String) ?? "?"
-                    let lab = (w["label"] as? String) ?? "?"
-                    return "\(id) \(lab)"
-                }
-                return "   Hermes → " + parts.joined(separator: " · ")
-            }()
-            let rowH: CGFloat = 52
-            let row = NSView(frame: NSRect(x: 0, y: y - 8, width: W - 2 * PAD, height: rowH))
-            row.addSubview(Self.label(head,
-                frame: NSRect(x: 0, y: 28, width: 150, height: 18), bold: true, size: 12))
-            let subLbl = Self.label(sub,
-                frame: NSRect(x: 0, y: 8, width: 150, height: 20), size: 10, secondary: true)
-            subLbl.maximumNumberOfLines = 2
-            row.addSubview(subLbl)
-            let btnY: CGFloat = 14
-            row.addSubview(button("Front", #selector(frontPressed(_:)),
-                NSRect(x: 155, y: btnY, width: 55, height: 28), id: name))
-            row.addSubview(button("Kill", #selector(killPressed(_:)),
-                NSRect(x: 214, y: btnY, width: 55, height: 28), id: name))
-            let perms = PairState.permissions(for: name)
-            let onCount = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only"]
-                .filter { (perms[$0] as? Bool) == true }.count
-            let noteOn = !((perms["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            let permsTitle = (onCount > 0 || noteOn) ? "Perms·\(onCount + (noteOn ? 1 : 0))" : "Perms"
-            row.addSubview(button(permsTitle, #selector(permsPressed(_:)),
-                NSRect(x: 273, y: btnY, width: 90, height: 28), id: name))
-            listContainer.addSubview(row)
-            y -= 58
+            var ws = Workers.list(from: entry)
+            if ws.isEmpty {
+                // show synthetic worker so tree always has a node
+                ws = [[
+                    "id": "w1",
+                    "label": (entry["worker_label"] as? String) ?? "Worker",
+                    "type": (entry["worker_type"] as? String) ?? "linked",
+                ]]
+            }
+
+            // Hermes root row
+            let hermesH: CGFloat = 30
+            let hermesRow = NSView(frame: NSRect(x: 0, y: y - hermesH, width: boxW, height: hermesH))
+            hermesRow.addSubview(Self.label("● Hermes  \(name)",
+                frame: NSRect(x: 0, y: 6, width: 160, height: 18), bold: true, size: 12))
+            hermesRow.addSubview(button("Front", #selector(frontPressed(_:)),
+                NSRect(x: 165, y: 2, width: 50, height: 26), id: name))
+            hermesRow.addSubview(button("Kill", #selector(killPressed(_:)),
+                NSRect(x: 218, y: 2, width: 48, height: 26), id: name))
+            // pair-level perms still available on Hermes row
+            let pperms = PairState.permissions(for: name)
+            let pon = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only"]
+                .filter { (pperms[$0] as? Bool) == true }.count
+            let pnote = !((pperms["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let ptitle = (pon > 0 || pnote) ? "Perms·\(pon + (pnote ? 1 : 0))" : "Perms"
+            hermesRow.addSubview(button(ptitle, #selector(permsPressed(_:)),
+                NSRect(x: 270, y: 2, width: 80, height: 26), id: name))
+            listContainer.addSubview(hermesRow)
+            y -= hermesH + 2
+
+            // Worker branches
+            for (i, w) in ws.enumerated() {
+                let wid = (w["id"] as? String) ?? "w\(i + 1)"
+                let lab = (w["label"] as? String) ?? "worker"
+                let isLast = i == ws.count - 1
+                let branch = isLast ? "└→" : "├→"
+                let rowH: CGFloat = 28
+                let row = NSView(frame: NSRect(x: 0, y: y - rowH, width: boxW, height: rowH))
+                let tag = "\(name)|\(wid)"
+                row.addSubview(Self.label("\(branch)  \(wid)  \(lab)",
+                    frame: NSRect(x: 10, y: 5, width: 150, height: 18), size: 11, secondary: false))
+                row.addSubview(button("Front", #selector(frontWorkerPressed(_:)),
+                    NSRect(x: 165, y: 1, width: 50, height: 24), id: tag))
+                row.addSubview(button("Kill", #selector(killWorkerPressed(_:)),
+                    NSRect(x: 218, y: 1, width: 48, height: 24), id: tag))
+                let wperms = Workers.permissions(pair: name, workerId: wid)
+                let won = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only"]
+                    .filter { (wperms[$0] as? Bool) == true }.count
+                let wnote = !((wperms["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let wtitle = (won > 0 || wnote) ? "Perms·\(won + (wnote ? 1 : 0))" : "Perms"
+                row.addSubview(button(wtitle, #selector(permsWorkerPressed(_:)),
+                    NSRect(x: 270, y: 1, width: 80, height: 24), id: tag))
+                listContainer.addSubview(row)
+                y -= rowH + 1
+            }
+            y -= 8 // gap between pairs
         }
     }
 
@@ -1627,7 +1747,38 @@ final class PanelController: NSObject {
 
     @objc private func permsPressed(_ sender: NSButton) {
         guard let name = sender.identifier?.rawValue else { return }
-        PermissionsSheetController.shared.show(for: name) { [weak self] in
+        // pair-level (Hermes row)
+        PermissionsSheetController.shared.show(for: name, workerId: nil) { [weak self] in
+            self?.refreshUI()
+        }
+    }
+
+    @objc private func frontWorkerPressed(_ sender: NSButton) {
+        guard let tag = sender.identifier?.rawValue else { return }
+        let parts = tag.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return }
+        Workers.frontWorker(pair: parts[0], workerId: parts[1])
+    }
+
+    @objc private func killWorkerPressed(_ sender: NSButton) {
+        guard let tag = sender.identifier?.rawValue else { return }
+        let parts = tag.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return }
+        let alert = NSAlert()
+        alert.messageText = "Remove \(parts[1]) from team?"
+        alert.informativeText = "Kills that worker terminal/view. Hermes stays if other workers remain."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        _ = Workers.removeWorker(pair: parts[0], workerId: parts[1])
+        refreshUI()
+    }
+
+    @objc private func permsWorkerPressed(_ sender: NSButton) {
+        guard let tag = sender.identifier?.rawValue else { return }
+        let parts = tag.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return }
+        PermissionsSheetController.shared.show(for: parts[0], workerId: parts[1]) { [weak self] in
             self?.refreshUI()
         }
     }
@@ -1743,6 +1894,7 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
 
     private var window: NSWindow?
     private var pairName = ""
+    private var workerId: String? = nil  // nil = pair-level; w1/w2 = per-worker
     private var onSaved: (() -> Void)?
     private var boxes: [String: NSButton] = [:]
     private var noteView: NSTextView!
@@ -1758,8 +1910,9 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         ("ask_each", "Ask in chat before each elevated permission"),
     ]
 
-    func show(for name: String, onSaved: @escaping () -> Void) {
+    func show(for name: String, workerId: String? = nil, onSaved: @escaping () -> Void) {
         self.pairName = name
+        self.workerId = workerId
         self.onSaved = onSaved
         if window == nil { buildWindow() }
         loadIntoUI()
@@ -1916,9 +2069,15 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     private func loadIntoUI() {
-        window?.title = "Permissions · \(pairName)"
-        let perms = PairState.permissions(for: pairName)
-        applyPermissionsToUI(perms, status: matchStatus(for: perms))
+        if let workerId {
+            window?.title = "Permissions · \(pairName) / \(workerId)"
+            let perms = Workers.permissions(pair: pairName, workerId: workerId)
+            applyPermissionsToUI(perms, status: matchStatus(for: perms))
+        } else {
+            window?.title = "Permissions · \(pairName) (Hermes / all)"
+            let perms = PairState.permissions(for: pairName)
+            applyPermissionsToUI(perms, status: matchStatus(for: perms))
+        }
     }
 
     private func matchStatus(for perms: [String: Any]) -> String {
@@ -2036,15 +2195,20 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
 
     @objc private func savePressed() {
         let perms = currentPermissionsFromUI()
-        let prev = PairState.loadPairsDb()[pairName] as? [String: Any] ?? [:]
-        PairState.savePairState(
-            pairName,
-            hermesWindowId: prev["hermes_window_id"] as? String,
-            claudeWindowId: prev["claude_window_id"] as? String,
-            claudeMode: prev["claude_mode"] as? String,
-            permissions: perms
-        )
-        Pong.log("permissions \(pairName) -> \(perms)")
+        if let workerId {
+            Workers.setPermissions(pair: pairName, workerId: workerId, permissions: perms)
+            Pong.log("permissions \(pairName)/\(workerId) -> \(perms)")
+        } else {
+            let prev = PairState.loadPairsDb()[pairName] as? [String: Any] ?? [:]
+            PairState.savePairState(
+                pairName,
+                hermesWindowId: prev["hermes_window_id"] as? String,
+                claudeWindowId: prev["claude_window_id"] as? String,
+                claudeMode: prev["claude_mode"] as? String,
+                permissions: perms
+            )
+            Pong.log("permissions \(pairName) -> \(perms)")
+        }
         window?.orderOut(nil)
         onSaved?()
     }

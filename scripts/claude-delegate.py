@@ -73,9 +73,13 @@ def load_pair_permissions(state: dict) -> dict:
         return {}
 
 
-def format_permissions_block(state: dict) -> str:
-    """Hard access constraints the user set on this pair (bans + freeform note)."""
-    perms = load_pair_permissions(state)
+def format_permissions_block(state: dict, worker: dict | None = None) -> str:
+    """Hard access constraints (pair-level, or per-worker if set)."""
+    perms = {}
+    if worker and isinstance(worker.get("permissions"), dict):
+        perms = worker["permissions"]
+    if not perms:
+        perms = load_pair_permissions(state)
     if not perms:
         return ""
     lines: list[str] = []
@@ -127,7 +131,7 @@ def build_prompt(
         else:
             print(f"[bridge] no '## Acceptance' section in {criteria_path}", file=sys.stderr)
     if state:
-        prompt = prompt.rstrip() + format_permissions_block(state)
+        prompt = prompt.rstrip() + format_permissions_block(state, state.get("_resolved_worker") if isinstance(state.get("_resolved_worker"), dict) else None)
     if use_claim:
         return prompt.rstrip() + CLAIM_INSTRUCTION
     if MARKER not in prompt:
@@ -474,6 +478,7 @@ def main() -> None:
     state = load_state()
     worker = resolve_worker(state, args.worker)
     if worker:
+        state = {**state, "_resolved_worker": worker}
         # Overlay worker routing onto state for mode selection
         if worker.get("window_id") not in (None, "", "null"):
             state = {**state, "claude_window_id": worker.get("window_id"),
