@@ -1496,7 +1496,7 @@ final class PanelController: NSObject {
     private var listContainer: NSView!
     private let guide = LinkGuideController()
 
-    private let W: CGFloat = 460, H: CGFloat = 720, PAD: CGFloat = 28
+    private let W: CGFloat = 460, H: CGFloat = 780, PAD: CGFloat = 28
 
     func show() {
         if window == nil { buildWindow() }
@@ -1616,11 +1616,11 @@ final class PanelController: NSObject {
         content.addSubview(Self.label("Hermes verifies every CLAIM and loops until accept or escalate.",
             frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 13), size: 9, secondary: true))
         y -= 14
-        content.addSubview(Self.label("Tree: Hermes → each worker. Front/Kill/Perms on Hermes or per worker.",
+        content.addSubview(Self.label("Hub = Hermes. Branches = team workers (each has Front / Kill / Perms).",
             frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 13), size: 9, secondary: true))
 
-        y -= 250
-        listContainer = NSView(frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 220))
+        y -= 280
+        listContainer = NSView(frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 260))
         content.addSubview(listContainer)
 
         let half = (W - 2 * PAD - 12) / 2
@@ -1644,21 +1644,23 @@ final class PanelController: NSObject {
     private func rebuildList(_ pairs: [String]) {
         guard let listContainer else { return }
         listContainer.subviews.forEach { $0.removeFromSuperview() }
-        let boxW = W - 2 * PAD
+        let boxW = listContainer.bounds.width > 0 ? listContainer.bounds.width : (W - 2 * PAD)
         if pairs.isEmpty {
             listContainer.addSubview(Self.label("No pairs yet — use New pair.",
                 frame: NSRect(x: 0, y: 150, width: boxW, height: 20), size: 12, secondary: true))
             return
         }
-        // Lay out from top of list container (y down in flipped coords? AppKit: y grows up.
-        // Existing code used y starting 150 and subtracting — keep same convention.
-        var y: CGFloat = 160
+
+        // Layout top-down in container (AppKit: origin bottom-left).
+        // Use full height so multi-worker teams aren't clipped.
+        let top: CGFloat = listContainer.bounds.height > 0 ? listContainer.bounds.height - 4 : 200
+        var y = top
         let db = PairState.loadPairsDb()
+
         for name in pairs {
             let entry = db[name] as? [String: Any] ?? [:]
             var ws = Workers.list(from: entry)
             if ws.isEmpty {
-                // show synthetic worker so tree always has a node
                 ws = [[
                     "id": "w1",
                     "label": (entry["worker_label"] as? String) ?? "Worker",
@@ -1666,52 +1668,87 @@ final class PanelController: NSObject {
                 ]]
             }
 
-            // Hermes root row
-            let hermesH: CGFloat = 30
-            let hermesRow = NSView(frame: NSRect(x: 0, y: y - hermesH, width: boxW, height: hermesH))
-            hermesRow.addSubview(Self.label("● Hermes  \(name)",
-                frame: NSRect(x: 0, y: 6, width: 160, height: 18), bold: true, size: 12))
+            // —— Hermes hub ——
+            let hermesH: CGFloat = 34
+            y -= hermesH
+            let hermesRow = NSView(frame: NSRect(x: 0, y: y, width: boxW, height: hermesH))
+            hermesRow.wantsLayer = true
+            hermesRow.layer?.backgroundColor =
+                NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.16, alpha: 1).cgColor
+            hermesRow.layer?.cornerRadius = 8
+
+            // Blue hub dot
+            let hub = NSView(frame: NSRect(x: 8, y: 10, width: 12, height: 12))
+            hub.wantsLayer = true
+            hub.layer?.backgroundColor =
+                NSColor(calibratedRed: 0.15, green: 0.01, blue: 0.95, alpha: 1).cgColor
+            hub.layer?.cornerRadius = 6
+            hermesRow.addSubview(hub)
+
+            hermesRow.addSubview(Self.label("Hermes  ·  \(name)",
+                frame: NSRect(x: 28, y: 8, width: 150, height: 18), bold: true, size: 12))
             hermesRow.addSubview(button("Front", #selector(frontPressed(_:)),
-                NSRect(x: 165, y: 2, width: 50, height: 26), id: name))
+                NSRect(x: 178, y: 4, width: 48, height: 26), id: name))
             hermesRow.addSubview(button("Kill", #selector(killPressed(_:)),
-                NSRect(x: 218, y: 2, width: 48, height: 26), id: name))
-            // pair-level perms still available on Hermes row
+                NSRect(x: 228, y: 4, width: 44, height: 26), id: name))
             let pperms = PairState.permissions(for: name)
             let pon = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only"]
                 .filter { (pperms[$0] as? Bool) == true }.count
             let pnote = !((pperms["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let ptitle = (pon > 0 || pnote) ? "Perms·\(pon + (pnote ? 1 : 0))" : "Perms"
             hermesRow.addSubview(button(ptitle, #selector(permsPressed(_:)),
-                NSRect(x: 270, y: 2, width: 80, height: 26), id: name))
+                NSRect(x: 274, y: 4, width: 78, height: 26), id: name))
             listContainer.addSubview(hermesRow)
-            y -= hermesH + 2
 
-            // Worker branches
+            // —— Team members under Hermes ——
             for (i, w) in ws.enumerated() {
                 let wid = (w["id"] as? String) ?? "w\(i + 1)"
                 let lab = (w["label"] as? String) ?? "worker"
                 let isLast = i == ws.count - 1
-                let branch = isLast ? "└→" : "├→"
-                let rowH: CGFloat = 28
-                let row = NSView(frame: NSRect(x: 0, y: y - rowH, width: boxW, height: rowH))
+                // Pure ASCII so nothing fails to render
+                let branch = isLast ? "`->" : "|->"
+                let rowH: CGFloat = 32
+                y -= rowH
+
+                let row = NSView(frame: NSRect(x: 0, y: y, width: boxW, height: rowH))
+                // Vertical rail under hub
+                let rail = NSView(frame: NSRect(x: 12, y: isLast ? rowH / 2 : 0, width: 2, height: isLast ? rowH / 2 : rowH))
+                rail.wantsLayer = true
+                rail.layer?.backgroundColor =
+                    NSColor(calibratedRed: 0.35, green: 0.35, blue: 0.42, alpha: 1).cgColor
+                row.addSubview(rail)
+                // Horizontal stub
+                let stub = NSView(frame: NSRect(x: 12, y: rowH / 2 - 1, width: 14, height: 2))
+                stub.wantsLayer = true
+                stub.layer?.backgroundColor =
+                    NSColor(calibratedRed: 0.35, green: 0.35, blue: 0.42, alpha: 1).cgColor
+                row.addSubview(stub)
+
+                // Worker node
+                let node = NSView(frame: NSRect(x: 28, y: 10, width: 10, height: 10))
+                node.wantsLayer = true
+                node.layer?.backgroundColor =
+                    NSColor(calibratedRed: 0.85, green: 0.45, blue: 0.30, alpha: 1).cgColor
+                node.layer?.cornerRadius = 5
+                row.addSubview(node)
+
                 let tag = "\(name)|\(wid)"
-                row.addSubview(Self.label("\(branch)  \(wid)  \(lab)",
-                    frame: NSRect(x: 10, y: 5, width: 150, height: 18), size: 11, secondary: false))
+                row.addSubview(Self.label("\(branch) \(wid) \(lab)",
+                    frame: NSRect(x: 42, y: 7, width: 130, height: 18), size: 11, secondary: false))
                 row.addSubview(button("Front", #selector(frontWorkerPressed(_:)),
-                    NSRect(x: 165, y: 1, width: 50, height: 24), id: tag))
+                    NSRect(x: 178, y: 4, width: 48, height: 24), id: tag))
                 row.addSubview(button("Kill", #selector(killWorkerPressed(_:)),
-                    NSRect(x: 218, y: 1, width: 48, height: 24), id: tag))
+                    NSRect(x: 228, y: 4, width: 44, height: 24), id: tag))
                 let wperms = Workers.permissions(pair: name, workerId: wid)
                 let won = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only"]
                     .filter { (wperms[$0] as? Bool) == true }.count
                 let wnote = !((wperms["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 let wtitle = (won > 0 || wnote) ? "Perms·\(won + (wnote ? 1 : 0))" : "Perms"
                 row.addSubview(button(wtitle, #selector(permsWorkerPressed(_:)),
-                    NSRect(x: 270, y: 1, width: 80, height: 24), id: tag))
+                    NSRect(x: 274, y: 4, width: 78, height: 24), id: tag))
                 listContainer.addSubview(row)
-                y -= rowH + 1
             }
-            y -= 8 // gap between pairs
+            y -= 10
         }
     }
 
