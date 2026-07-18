@@ -4,9 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Hermes Pong — Hermes + any AI terminal for Mac</title>
-  <meta name="description" content="Hermes orchestrates. Your AI terminals build — Claude, Kimi, Grok, Codex, or anything you sign into. Free forever — tip if you like." />
+  <meta name="description" content="Hermes orchestrates multi-worker teams on Mac — Claude, Kimi, Grok, Codex. Save teams, rename panes, colors, per-worker perms. Free forever — tip if you like." />
   <meta property="og:title" content="Hermes Pong" />
-  <meta property="og:description" content="Hermes drives the AI terminals you already use. Claude by default, any model you want. Free, tip optional." />
+  <meta property="og:description" content="Multi-worker teams, Save/Show Teams, rename, colors, per-worker perms. Hermes + the terminals you already use. Free, tip optional." />
   <meta property="og:type" content="website" />
   <link rel="icon" href="logo.png" />
   <style>
@@ -355,6 +355,44 @@
       font-size: 1.6rem;
       color: #888;
     }
+
+    .feat-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      margin: 0;
+    }
+    @media (min-width: 560px) {
+      .feat-grid { grid-template-columns: 1fr 1fr; }
+    }
+    .feat {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px 16px;
+      background: #fff;
+    }
+    .feat strong {
+      display: block;
+      color: var(--text);
+      font-size: .95rem;
+      letter-spacing: -0.01em;
+      margin-bottom: 4px;
+    }
+    .feat span {
+      color: var(--muted);
+      font-size: .88rem;
+      line-height: 1.4;
+    }
+    .terminal-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: stretch;
+      width: 220px;
+    }
+    .terminal-window.sm { width: 100%; }
+    .terminal-window.sm .terminal-body { padding: 10px 12px; font-size: .82rem; }
+    .terminal-pair.team { align-items: stretch; }
   </style>
 </head>
 <body>
@@ -364,7 +402,7 @@
         <img class="logo" src="logo.png" alt="Hermes Pong" />
         <div>
           <div class="brand">Hermes Pong</div>
-          <div class="sub">macOS · Terminal · Hermes + your AI workers</div>
+          <div class="sub">macOS · multi-worker teams · Hermes + your terminals</div>
         </div>
       </div>
       <nav aria-label="Primary">
@@ -374,47 +412,58 @@
       </nav>
     </header>
 
-    <h1>One orchestrator.<br /><span class="grad">Any workers.</span></h1>
+    <h1>One orchestrator.<br /><span class="grad">A whole team.</span></h1>
     <p class="lead">
       <strong style="color:#2602f1">Hermes</strong> plans and verifies.
-      Your other terminals build — <strong style="color:#d97756">Claude Code</strong> by default,
-      or Kimi, Grok, Codex, DeepSeek, OpenRouter CLIs, whatever you already signed into.
-      Link existing windows or launch fresh. Model, resume, and context stay yours.
+      Your terminals build — <strong style="color:#d97756">Claude Code</strong> by default,
+      plus Kimi, Grok, Codex, or anything you already signed into.
+      Multi-worker teams, save &amp; reload, rename, colors, per-worker perms.
+      Model, resume, and context stay yours.
     </p>
 
-    <!-- Light terminal window illustration -->
-    <div class="terminal-pair">
+    <!-- Team: Hermes + stacked workers -->
+    <div class="terminal-pair team">
       <div class="terminal-window">
         <div class="terminal-header">
           <div class="terminal-dot red"></div>
           <div class="terminal-dot yellow"></div>
           <div class="terminal-dot green"></div>
-          <div class="terminal-title">HERMES-AGENT</div>
+          <div class="terminal-title">Hermes</div>
         </div>
-        <div class="terminal-body" style="color:#d97756; font-weight:600;">HERMES-AGENT</div>
+        <div class="terminal-body" style="color:#2602f1; font-weight:600;">orchestrate · verify</div>
       </div>
 
-      <div class="arrow">↔</div>
+      <div class="arrow">→</div>
 
-      <div class="terminal-window">
-        <div class="terminal-header">
-          <div class="terminal-dot red"></div>
-          <div class="terminal-dot yellow"></div>
-          <div class="terminal-dot green"></div>
-          <div class="terminal-title">Worker</div>
+      <div class="terminal-stack">
+        <div class="terminal-window sm">
+          <div class="terminal-header">
+            <div class="terminal-dot red"></div>
+            <div class="terminal-dot yellow"></div>
+            <div class="terminal-dot green"></div>
+            <div class="terminal-title">Claude</div>
+          </div>
+          <div class="terminal-body" style="color:#d97756; font-weight:600;">worker w1</div>
         </div>
-        <div class="terminal-body" style="color:#2602f1; font-weight:600;">
-          Claude · Kimi · Grok · …
+        <div class="terminal-window sm">
+          <div class="terminal-header">
+            <div class="terminal-dot red"></div>
+            <div class="terminal-dot yellow"></div>
+            <div class="terminal-dot green"></div>
+            <div class="terminal-title">Grok · Kimi · …</div>
+          </div>
+          <div class="terminal-body" style="color:#2602f1; font-weight:600;">worker w2+</div>
         </div>
       </div>
     </div>
 
     <div class="pill-row">
-      <span class="pill">Link existing terminals</span>
-      <span class="pill">Or open a new pair</span>
-      <span class="pill">Pick Claude / Kimi / Grok / custom</span>
-      <span class="pill">One Hermes → many workers</span>
-      <span class="pill">Local-only verdict ledger</span>
+      <span class="pill">Claude · Other Model · Team</span>
+      <span class="pill">Save Team · Show Teams</span>
+      <span class="pill">Rename panes</span>
+      <span class="pill">Background · Text · Marker</span>
+      <span class="pill">Per-worker Perms</span>
+      <span class="pill">Local verdict ledger</span>
       <span class="pill">Free forever</span>
     </div>
 
@@ -457,10 +506,42 @@
     <section class="card">
       <h2>How it works</h2>
       <ol class="steps">
-        <li><div><strong>Install</strong> Hermes Pong on your Mac (unzip → drag to Applications → double-click; signed &amp; notarized).</div></li>
-        <li><div><strong>Link existing</strong> Hermes + any AI terminals you already logged into (keeps each session), or start a <strong>New pair</strong> and pick a worker to launch.</div></li>
-        <li><div>When Hermes delegates, the task lands in the <strong>worker window</strong> you chose. Hermes verifies results in a <strong>local-only verdict ledger</strong>; nothing leaves your Mac.</div></li>
+        <li><div><strong>Install</strong> Hermes Pong on your Mac (unzip → Applications → open).</div></li>
+        <li><div><strong>New pair</strong> — Claude, Other Model, or <strong>Team</strong> (stack workers under one Hermes). Or <strong>Link</strong> terminals you already have open.</div></li>
+        <li><div><strong>Name &amp; color</strong> panes, set <strong>Perms</strong> per worker, then <strong>Save Team</strong> so <strong>Show Teams</strong> can open / duplicate / delete later.</div></li>
+        <li><div>Hermes hands tasks into the live worker window. A <strong>local verdict ledger</strong> records accepts &amp; rejects — nothing leaves your Mac.</div></li>
       </ol>
+    </section>
+
+    <section class="card" id="features">
+      <h2>What&rsquo;s in v1.3</h2>
+      <p>Multi-worker teams and control-panel polish, shipped.</p>
+      <div class="feat-grid">
+        <div class="feat">
+          <strong>Teams</strong>
+          <span>One Hermes hub → many workers. Vertical Team picker. Terminals stack top to bottom.</span>
+        </div>
+        <div class="feat">
+          <strong>Save &amp; Show Teams</strong>
+          <span>Snapshot names, colors, workers, perms. Manager scrolls; open by click; Duplicate / Delete.</span>
+        </div>
+        <div class="feat">
+          <strong>Rename</strong>
+          <span>Click Hermes or a worker name in Active pairs. Titles hit Terminal + tmux for that pane only.</span>
+        </div>
+        <div class="feat">
+          <strong>Colors</strong>
+          <span>Background, Text, and Marker (bold/cursor accent). Private profile per role — no painting your other Terminals.</span>
+        </div>
+        <div class="feat">
+          <strong>Per-worker Perms</strong>
+          <span>Ban MCP / root / network / system paths, ask-each-time, freeform note. Full access &amp; Ask presets highlight when selected.</span>
+        </div>
+        <div class="feat">
+          <strong>Bridge</strong>
+          <span><code style="font-size:.85em">pong-delegate.py --worker w2</code> fans work to a specific worker. Verdict loop always on.</span>
+        </div>
+      </div>
     </section>
 
     <section class="card" id="army">
@@ -468,7 +549,7 @@
       <p style="margin:0 0 12px">
         Sign in wherever you already work. Pong pairs <strong>windows</strong>, not vendors.
         Claude Code is the default worker; Kimi, Grok, Codex, DeepSeek, OpenRouter-backed CLIs,
-        or a custom command fit the same bridge. Roadmap: one Hermes driving several workers at once.
+        or a custom command share the same bridge — alone or as a multi-worker team under one Hermes.
       </p>
       <p class="note" style="margin:0">
         You own logins and sessions. Pong never stores model API keys.
