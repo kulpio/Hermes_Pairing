@@ -771,7 +771,7 @@ enum TerminalTheme {
 // MARK: - Saved teams (~/.hermes-pong/teams.json)
 
 /// Snapshot of Hermes display name/colors + worker types/labels/cmds/perms/colors.
-/// Spawnable from New pair → Saved team…
+/// Spawnable from Show Teams…
 enum SavedTeams {
     static var path: String { Pong.stateDir + "/teams.json" }
 
@@ -846,6 +846,31 @@ enum SavedTeams {
     static func delete(id: String) {
         writeAll(loadAll().filter { $0.id != id })
         Pong.log("deleted team \(id)")
+    }
+
+
+    @discardableResult
+    static func duplicate(id: String) -> Team? {
+        guard let src = loadAll().first(where: { $0.id == id }) else { return nil }
+        var list = loadAll()
+        var base = src.name + " copy"
+        var n = 2
+        while list.contains(where: { $0.name.caseInsensitiveCompare(base) == .orderedSame }) {
+            base = "\(src.name) copy \(n)"
+            n += 1
+        }
+        let newId = "team-\(Int(Date().timeIntervalSince1970))-\(Int.random(in: 100...999))"
+        let team = Team(
+            id: newId,
+            name: base,
+            displayName: src.displayName,
+            hermesColors: src.hermesColors,
+            workers: src.workers
+        )
+        list.append(team)
+        writeAll(list)
+        Pong.log("duplicated team \(id) → \(newId) name=\(base)")
+        return team
     }
 
     private static func writeAll(_ list: [Team]) {
@@ -1936,13 +1961,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let gate = NSAlert()
         gate.messageText = "New pair"
         gate.informativeText = saved.isEmpty
-            ? "Always one Hermes. Pick how to staff it.\n(Save a team from an Active pair to enable Load Team.)"
-            : "Always one Hermes.\nLoad Team = spawn a saved team (\(saved.count) saved)."
+            ? "Always one Hermes. Pick how to staff it.\n(Save a team from an Active pair to enable Show Teams.)"
+            : "Always one Hermes.\nShow Teams = manage / open saved teams (\(saved.count) saved)."
         gate.addButton(withTitle: "Claude")
         gate.addButton(withTitle: "Other Model")
         gate.addButton(withTitle: "Team")
         if !saved.isEmpty {
-            gate.addButton(withTitle: "Load Team")
+            gate.addButton(withTitle: "Show Teams")
         }
         gate.addButton(withTitle: "Cancel")
         let g = gate.runModal()
@@ -1957,7 +1982,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return TeamBuilderPanel.run(mode: .team)
         }
         if !saved.isEmpty && g == NSApplication.ModalResponse(rawValue: first.rawValue + 3) {
-            return pickAndSpawnSavedTeam() ? [] : nil
+            // Open manager; if user launches from there, empty workers = already spawned handled by refresh
+            TeamsManagerPanel.shared.show {
+                PanelController.shared.refreshUI()
+            }
+            return nil
         }
         return nil
     }
@@ -2159,13 +2188,11 @@ final class PanelController: NSObject {
             NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 38)))
         y -= 40
         let nSaved = SavedTeams.loadAll().count
-        let loadTitle = nSaved > 0 ? "Load Team (\(nSaved))" : "Load Team"
-        let loadBtn = button(loadTitle, #selector(loadTeamPressed(_:)),
-            NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 36))
-        loadBtn.isEnabled = nSaved > 0
-        content.addSubview(loadBtn)
+        let showTitle = nSaved > 0 ? "Show Teams (\(nSaved))" : "Show Teams"
+        content.addSubview(button(showTitle, #selector(showTeamsPressed(_:)),
+            NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 36)))
         y -= 34
-        content.addSubview(Self.label("Claude · Other Model · Team · Load Team (after Save Team on a pair).",
+        content.addSubview(Self.label("Claude · Other Model · Team · Show Teams (open / dup / delete).",
             frame: NSRect(x: PAD + 2, y: y, width: W - 2 * PAD - 4, height: 28), size: 11, secondary: true))
         y -= 44
         content.addSubview(button("Link existing terminals", #selector(linkPressed(_:)),
@@ -2355,9 +2382,9 @@ final class PanelController: NSObject {
 
     // MARK: Actions
 
-    @objc private func loadTeamPressed(_ sender: NSButton) {
-        if AppDelegate.pickAndSpawnSavedTeam() {
-            refreshUI()
+    @objc private func showTeamsPressed(_ sender: NSButton) {
+        TeamsManagerPanel.shared.show { [weak self] in
+            self?.refreshUI()
         }
     }
 
@@ -2442,7 +2469,7 @@ final class PanelController: NSObject {
                 let a = NSAlert()
                 a.messageText = "Team saved"
                 a.informativeText =
-                    "“\(name)” is under New pair → Saved team…\n" +
+                    "“\(name)” is under Show Teams…\n" +
                     "Includes workers, names, colors, and per-worker perms."
                 a.addButton(withTitle: "OK")
                 a.runModal()
@@ -2965,6 +2992,162 @@ final class ColorThemeSheet: NSObject {
 }
 
 
+
+// MARK: - Show Teams manager
+
+final class TeamsManagerPanel: NSObject {
+    static let shared = TeamsManagerPanel()
+    private var window: NSWindow?
+    private var listBox: NSView!
+    private var onChange: (() -> Void)?
+
+    func show(onChange: (() -> Void)? = nil) {
+        self.onChange = onChange
+        if window == nil { build() }
+        rebuildList()
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.center()
+    }
+
+    private func build() {
+        let W: CGFloat = 420, H: CGFloat = 480
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: W, height: H),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false)
+        win.title = "Saved teams"
+        win.isReleasedWhenClosed = false
+        win.level = .floating
+        win.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.07, blue: 0.09, alpha: 1)
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+
+        let title = NSTextField(labelWithString: "Teams")
+        title.font = .boldSystemFont(ofSize: 16)
+        title.textColor = .white
+        title.frame = NSRect(x: 20, y: H - 40, width: 200, height: 22)
+        content.addSubview(title)
+
+        let hint = NSTextField(labelWithString: "Open launches. Duplicate copies. Delete removes.")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = NSColor(calibratedWhite: 0.55, alpha: 1)
+        hint.frame = NSRect(x: 20, y: H - 60, width: W - 40, height: 16)
+        content.addSubview(hint)
+
+        listBox = NSView(frame: NSRect(x: 16, y: 56, width: W - 32, height: H - 90))
+        content.addSubview(listBox)
+
+        let close = NSButton(frame: NSRect(x: W - 100, y: 14, width: 80, height: 30))
+        close.title = "Close"
+        close.bezelStyle = .rounded
+        close.target = self
+        close.action = #selector(closePressed)
+        content.addSubview(close)
+
+        win.contentView = content
+        window = win
+    }
+
+    private func rebuildList() {
+        listBox.subviews.forEach { $0.removeFromSuperview() }
+        let teams = SavedTeams.loadAll()
+        let W = listBox.bounds.width > 0 ? listBox.bounds.width : 388
+        let H = listBox.bounds.height > 0 ? listBox.bounds.height : 390
+        if teams.isEmpty {
+            let empty = NSTextField(labelWithString: "No saved teams yet.\nSave Team on an Active pair Hermes row.")
+            empty.font = .systemFont(ofSize: 12)
+            empty.textColor = NSColor(calibratedWhite: 0.5, alpha: 1)
+            empty.alignment = .center
+            empty.maximumNumberOfLines = 3
+            empty.frame = NSRect(x: 10, y: H / 2 - 30, width: W - 20, height: 60)
+            listBox.addSubview(empty)
+            return
+        }
+        var y = H - 8
+        for t in teams {
+            let rowH: CGFloat = 52
+            y -= rowH
+            let row = NSView(frame: NSRect(x: 0, y: y, width: W, height: rowH - 4))
+            row.wantsLayer = true
+            row.layer?.backgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1).cgColor
+            row.layer?.cornerRadius = 8
+
+            let nameBtn = NSButton(frame: NSRect(x: 10, y: 12, width: 160, height: 28))
+            nameBtn.title = "\(t.name)  (\(t.workers.count))"
+            nameBtn.bezelStyle = .inline
+            nameBtn.isBordered = false
+            nameBtn.alignment = .left
+            nameBtn.font = .boldSystemFont(ofSize: 12)
+            nameBtn.contentTintColor = NSColor(calibratedWhite: 0.95, alpha: 1)
+            nameBtn.target = self
+            nameBtn.action = #selector(openPressed(_:))
+            nameBtn.identifier = NSUserInterfaceItemIdentifier(t.id)
+            nameBtn.toolTip = "Open / launch this team"
+            row.addSubview(nameBtn)
+
+            let open = smallBtn("Open", #selector(openPressed(_:)), NSRect(x: 175, y: 12, width: 56, height: 26), t.id)
+            let dup = smallBtn("Dup", #selector(dupPressed(_:)), NSRect(x: 235, y: 12, width: 50, height: 26), t.id)
+            let del = smallBtn("Delete", #selector(deletePressed(_:)), NSRect(x: 289, y: 12, width: 64, height: 26), t.id)
+            row.addSubview(open)
+            row.addSubview(dup)
+            row.addSubview(del)
+            listBox.addSubview(row)
+            y -= 6
+        }
+    }
+
+    private func smallBtn(_ title: String, _ sel: Selector, _ frame: NSRect, _ id: String) -> NSButton {
+        let b = NSButton(frame: frame)
+        b.title = title
+        b.bezelStyle = .rounded
+        b.font = .systemFont(ofSize: 11)
+        b.target = self
+        b.action = sel
+        b.identifier = NSUserInterfaceItemIdentifier(id)
+        return b
+    }
+
+    @objc private func openPressed(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue,
+              let team = SavedTeams.loadAll().first(where: { $0.id == id }) else { return }
+        window?.orderOut(nil)
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = SavedTeams.spawn(team)
+            DispatchQueue.main.async {
+                self.onChange?()
+                PanelController.shared.refreshUI()
+            }
+        }
+    }
+
+    @objc private func dupPressed(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        _ = SavedTeams.duplicate(id: id)
+        rebuildList()
+        onChange?()
+    }
+
+    @objc private func deletePressed(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue,
+              let team = SavedTeams.loadAll().first(where: { $0.id == id }) else { return }
+        let a = NSAlert()
+        a.messageText = "Delete “\(team.name)”?"
+        a.informativeText = "This only removes the saved pack. Running pairs are untouched."
+        a.addButton(withTitle: "Delete")
+        a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        SavedTeams.delete(id: id)
+        rebuildList()
+        onChange?()
+    }
+
+    @objc private func closePressed() {
+        window?.orderOut(nil)
+        onChange?()
+    }
+}
+
+
 /// Modal sheet: tick ban boxes + freeform prompt. Stored on the pair in pairs.json
 /// and mirrored into active-pair.json so claude-delegate can inject constraints.
 final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDelegate {
@@ -2978,6 +3161,9 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
     private var noteView: NSTextView!
     private var presetStatus: NSTextField!
     private var contentRoot: NSView!
+    private var fullPresetBtn: NSButton!
+    private var askPresetBtn: NSButton!
+    private var selectedPresetId: String? = nil  // "full" | "ask_each" | user id | nil
 
     private let keys: [(String, String)] = [
         ("ban_mcp", "Ban MCP tools / external tool servers"),
@@ -3045,11 +3231,13 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         let loadW: CGFloat = 100
         let saveAsW: CGFloat = 88
         var x = PAD
-        content.addSubview(makeButton("Full access", #selector(applyFullPreset),
-            NSRect(x: x, y: y - btnH, width: fullW, height: btnH)))
+        fullPresetBtn = makeButton("Full access", #selector(applyFullPreset),
+            NSRect(x: x, y: y - btnH, width: fullW, height: btnH))
+        content.addSubview(fullPresetBtn)
         x += fullW + gap
-        content.addSubview(makeButton("Ask each time", #selector(applyAskPreset),
-            NSRect(x: x, y: y - btnH, width: askW, height: btnH)))
+        askPresetBtn = makeButton("Ask each time", #selector(applyAskPreset),
+            NSRect(x: x, y: y - btnH, width: askW, height: btnH))
+        content.addSubview(askPresetBtn)
         x += askW + gap
         content.addSubview(makeButton("Load saved…", #selector(loadSavedPreset),
             NSRect(x: x, y: y - btnH, width: loadW, height: btnH)))
@@ -3136,7 +3324,7 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         return perms
     }
 
-    private func applyPermissionsToUI(_ perms: [String: Any], status: String) {
+    private func applyPermissionsToUI(_ perms: [String: Any], status: String, presetId: String? = nil) {
         var merged = PairState.defaultPermissions()
         for (k, v) in perms { merged[k] = v }
         for (key, box) in boxes {
@@ -3144,6 +3332,47 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         }
         noteView?.string = (merged["custom_prompt"] as? String) ?? ""
         presetStatus?.stringValue = status
+        if let presetId {
+            selectedPresetId = presetId
+        } else if permissionsEqual(merged, PairState.fullAccessPermissions()) {
+            selectedPresetId = "full"
+        } else if permissionsEqual(merged, PairState.askEachPermissions()) {
+            selectedPresetId = "ask_each"
+        } else {
+            // keep explicit id if status starts with Saved:
+            if status.hasPrefix("Saved:") || status.hasPrefix("Preset:") {
+                // leave selectedPresetId if caller set via presetId
+            } else {
+                selectedPresetId = nil
+            }
+        }
+        if presetId != nil {
+            selectedPresetId = presetId
+        }
+        highlightPresetButtons()
+    }
+
+    private func highlightPresetButtons() {
+        stylePreset(fullPresetBtn, on: selectedPresetId == "full")
+        stylePreset(askPresetBtn, on: selectedPresetId == "ask_each")
+    }
+
+    private func stylePreset(_ btn: NSButton?, on: Bool) {
+        guard let btn else { return }
+        btn.wantsLayer = true
+        if on {
+            btn.bezelColor = NSColor(calibratedRed: 0.20, green: 0.35, blue: 0.95, alpha: 1)
+            btn.contentTintColor = .white
+            btn.layer?.backgroundColor = NSColor(calibratedRed: 0.18, green: 0.32, blue: 0.92, alpha: 0.95).cgColor
+            btn.layer?.cornerRadius = 6
+            btn.font = .boldSystemFont(ofSize: 12)
+        } else {
+            btn.bezelColor = nil
+            btn.contentTintColor = nil
+            btn.layer?.backgroundColor = NSColor(calibratedWhite: 0.18, alpha: 1).cgColor
+            btn.layer?.cornerRadius = 6
+            btn.font = .systemFont(ofSize: 12)
+        }
     }
 
     private func loadIntoUI() {
@@ -3181,18 +3410,22 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
 
     @objc private func boxChanged(_ sender: NSButton) {
         presetStatus?.stringValue = "Custom for this pair"
+        selectedPresetId = nil
+        highlightPresetButtons()
     }
 
     func textDidChange(_ notification: Notification) {
         presetStatus?.stringValue = "Custom for this pair"
+        selectedPresetId = nil
+        highlightPresetButtons()
     }
 
     @objc private func applyFullPreset() {
-        applyPermissionsToUI(PairState.fullAccessPermissions(), status: "Preset: Full access")
+        applyPermissionsToUI(PairState.fullAccessPermissions(), status: "Preset: Full access", presetId: "full")
     }
 
     @objc private func applyAskPreset() {
-        applyPermissionsToUI(PairState.askEachPermissions(), status: "Preset: Ask each time")
+        applyPermissionsToUI(PairState.askEachPermissions(), status: "Preset: Ask each time", presetId: "ask_each")
     }
 
     @objc private func loadSavedPreset() {
@@ -3222,7 +3455,7 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         guard let id = popup.selectedItem?.representedObject as? String,
               let item = users.first(where: { $0.id == id }) else { return }
         if resp == first {
-            applyPermissionsToUI(item.permissions, status: "Saved: \(item.name)")
+            applyPermissionsToUI(item.permissions, status: "Saved: \(item.name)", presetId: item.id)
         } else if resp == NSApplication.ModalResponse(rawValue: first.rawValue + 1) {
             let confirm = NSAlert()
             confirm.messageText = "Delete “\(item.name)”?"
@@ -3264,7 +3497,9 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     @objc private func clearPressed() {
-        applyPermissionsToUI(PairState.defaultPermissions(), status: "Custom for this pair")
+        applyPermissionsToUI(PairState.defaultPermissions(), status: "Custom for this pair", presetId: nil)
+        selectedPresetId = nil
+        highlightPresetButtons()
     }
 
     @objc private func cancelPressed() {
