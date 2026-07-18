@@ -635,7 +635,7 @@ enum TerminalTheme {
     }
 
     /// Title + colors on ONE pair pane. Uses NSAppleScript + tab properties.
-    /// colors.highlight = Window accent (bold + cursor). Terminal has no title-bar color API.
+    /// colors.highlight = Marker accent (bold + cursor). Terminal has no title-bar color API.
     static func apply(windowId: String?, displayTitle: String, viewToken: String, colors: Colors?, profile: String) {
         guard let wid = windowId, Int(wid) != nil else {
             Pong.log("theme apply skip — no window for \(viewToken)")
@@ -2349,7 +2349,7 @@ final class PanelController: NSObject {
         b.target = self
         b.action = action
         b.identifier = NSUserInterfaceItemIdentifier(id)
-        b.toolTip = "Colors: background, text, window accent"
+        b.toolTip = "Colors: background, text, marker"
         return b
     }
 
@@ -2918,7 +2918,7 @@ final class ColorThemeSheet: NSObject {
             return well
         }
         var y: CGFloat = H - 48
-        let hint = NSTextField(labelWithString: "Background · Text · Window accent (bold/cursor).")
+        let hint = NSTextField(labelWithString: "Background · Text · Marker (bold/cursor).")
         hint.frame = NSRect(x: 24, y: y, width: W - 48, height: 18)
         hint.textColor = NSColor(calibratedWhite: 0.55, alpha: 1)
         hint.font = NSFont.systemFont(ofSize: 11)
@@ -2928,7 +2928,7 @@ final class ColorThemeSheet: NSObject {
         y -= 40
         textWell = row("Text", y: y)
         y -= 40
-        hiWell = row("Window", y: y)
+        hiWell = row("Marker", y: y)
 
         let apply = NSButton(frame: NSRect(x: W - 24 - 100, y: 16, width: 100, height: 32))
         apply.title = "Apply"
