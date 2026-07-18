@@ -2998,8 +2998,11 @@ final class ColorThemeSheet: NSObject {
 final class TeamsManagerPanel: NSObject {
     static let shared = TeamsManagerPanel()
     private var window: NSWindow?
+    private var scrollView: NSScrollView!
     private var listBox: NSView!
     private var onChange: (() -> Void)?
+    private let listW: CGFloat = 388
+    private let listH: CGFloat = 390
 
     func show(onChange: (() -> Void)? = nil) {
         self.onChange = onChange
@@ -3028,14 +3031,24 @@ final class TeamsManagerPanel: NSObject {
         title.frame = NSRect(x: 20, y: H - 40, width: 200, height: 22)
         content.addSubview(title)
 
-        let hint = NSTextField(labelWithString: "Open launches. Duplicate copies. Delete removes.")
+        let hint = NSTextField(labelWithString: "Click a team to open. Duplicate / Delete on the right.")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = NSColor(calibratedWhite: 0.55, alpha: 1)
         hint.frame = NSRect(x: 20, y: H - 60, width: W - 40, height: 16)
         content.addSubview(hint)
 
-        listBox = NSView(frame: NSRect(x: 16, y: 56, width: W - 32, height: H - 90))
-        content.addSubview(listBox)
+        scrollView = NSScrollView(frame: NSRect(x: 16, y: 56, width: W - 32, height: H - 90))
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.backgroundColor = .clear
+        scrollView.scrollerStyle = .overlay
+
+        listBox = NSView(frame: NSRect(x: 0, y: 0, width: listW, height: listH))
+        scrollView.documentView = listBox
+        content.addSubview(scrollView)
 
         let close = NSButton(frame: NSRect(x: W - 100, y: 14, width: 80, height: 30))
         close.title = "Close"
@@ -3051,28 +3064,37 @@ final class TeamsManagerPanel: NSObject {
     private func rebuildList() {
         listBox.subviews.forEach { $0.removeFromSuperview() }
         let teams = SavedTeams.loadAll()
-        let W = listBox.bounds.width > 0 ? listBox.bounds.width : 388
-        let H = listBox.bounds.height > 0 ? listBox.bounds.height : 390
+        let rowH: CGFloat = 52
+        let gap: CGFloat = 6
+        let contentH: CGFloat
+        if teams.isEmpty {
+            contentH = listH
+        } else {
+            contentH = max(listH, CGFloat(teams.count) * (rowH + gap) + 16)
+        }
+        listBox.setFrameSize(NSSize(width: listW, height: contentH))
+
         if teams.isEmpty {
             let empty = NSTextField(labelWithString: "No saved teams yet.\nSave Team on an Active pair Hermes row.")
             empty.font = .systemFont(ofSize: 12)
             empty.textColor = NSColor(calibratedWhite: 0.5, alpha: 1)
             empty.alignment = .center
             empty.maximumNumberOfLines = 3
-            empty.frame = NSRect(x: 10, y: H / 2 - 30, width: W - 20, height: 60)
+            empty.frame = NSRect(x: 10, y: contentH / 2 - 30, width: listW - 20, height: 60)
             listBox.addSubview(empty)
+            scrollToTop()
             return
         }
-        var y = H - 8
+
+        var y = contentH - 8
         for t in teams {
-            let rowH: CGFloat = 52
             y -= rowH
-            let row = NSView(frame: NSRect(x: 0, y: y, width: W, height: rowH - 4))
+            let row = NSView(frame: NSRect(x: 0, y: y, width: listW, height: rowH - 4))
             row.wantsLayer = true
             row.layer?.backgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1).cgColor
             row.layer?.cornerRadius = 8
 
-            let nameBtn = NSButton(frame: NSRect(x: 10, y: 12, width: 160, height: 28))
+            let nameBtn = NSButton(frame: NSRect(x: 10, y: 10, width: 200, height: 30))
             nameBtn.title = "\(t.name)  (\(t.workers.count))"
             nameBtn.bezelStyle = .inline
             nameBtn.isBordered = false
@@ -3085,15 +3107,23 @@ final class TeamsManagerPanel: NSObject {
             nameBtn.toolTip = "Open / launch this team"
             row.addSubview(nameBtn)
 
-            let open = smallBtn("Open", #selector(openPressed(_:)), NSRect(x: 175, y: 12, width: 56, height: 26), t.id)
-            let dup = smallBtn("Dup", #selector(dupPressed(_:)), NSRect(x: 235, y: 12, width: 50, height: 26), t.id)
-            let del = smallBtn("Delete", #selector(deletePressed(_:)), NSRect(x: 289, y: 12, width: 64, height: 26), t.id)
-            row.addSubview(open)
+            let dup = smallBtn("Duplicate", #selector(dupPressed(_:)),
+                               NSRect(x: 218, y: 12, width: 88, height: 26), t.id)
+            let del = smallBtn("Delete", #selector(deletePressed(_:)),
+                               NSRect(x: 310, y: 12, width: 64, height: 26), t.id)
             row.addSubview(dup)
             row.addSubview(del)
             listBox.addSubview(row)
-            y -= 6
+            y -= gap
         }
+        scrollToTop()
+    }
+
+    private func scrollToTop() {
+        guard let doc = scrollView.documentView else { return }
+        let y = max(0, doc.bounds.height - scrollView.contentView.bounds.height)
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     private func smallBtn(_ title: String, _ sel: Selector, _ frame: NSRect, _ id: String) -> NSButton {
