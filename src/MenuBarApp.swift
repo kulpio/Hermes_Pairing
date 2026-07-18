@@ -543,57 +543,104 @@ enum TerminalTheme {
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
-    /// Set custom title + colors on a Terminal window by id.
-    /// Colors must target `current settings of selected tab` (window-level colors are ignored on modern Terminal).
-    static func apply(windowId: String?, title: String?, colors: Colors?) {
+    /// Dedicated profile name — never mutate Basic/Pro (that recolors unrelated Terminals).
+    static func profileName(pair: String, role: String) -> String {
+        let raw = "HP-\(pair)-\(role)"
+            .replacingOccurrences(of: " ", with: "-")
+        return raw.count <= 40 ? raw : String(raw.prefix(40))
+    }
+
+    static func listWindows() -> [(id: String, title: String)] {
+        let out = Pong.osascript("""
+        tell application "Terminal"
+          set acc to ""
+          repeat with w in windows
+            try
+              set acc to acc & (id of w as string) & "|||" & (name of w) & linefeed
+            end try
+          end repeat
+          return acc
+        end tell
+        """)
+        var rows: [(String, String)] = []
+        for line in out.split(separator: "\n") {
+            guard let sep = line.range(of: "|||") else { continue }
+            let wid = String(line[..<sep.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let title = String(line[sep.upperBound...]).trimmingCharacters(in: .whitespaces)
+            if Int(wid) != nil { rows.append((wid, title)) }
+        }
+        return rows
+    }
+
+    static func resolveWindowId(stored: String?, hints: [String], avoid: Set<String> = []) -> String? {
+        let wins = listWindows().filter { !avoid.contains($0.id) }
+        let ids = Set(wins.map(\.id))
+        if let s = stored, Int(s) != nil, ids.contains(s), !avoid.contains(s) { return s }
+        let lowerHints = hints.map { $0.lowercased() }.filter { !$0.isEmpty }
+        for (id, title) in wins {
+            let t = title.lowercased()
+            for h in lowerHints where t.contains(h) { return id }
+        }
+        return nil
+    }
+
+    /// Paint ONE window via a private settings set (do not touch shared Basic/Pro).
+    static func apply(windowId: String?, title: String?, colors: Colors?, profile: String) {
         guard let wid = windowId, Int(wid) != nil else {
-            Pong.log("theme apply skip — no window id")
+            Pong.log("theme apply skip — no window id profile=\(profile)")
             return
         }
-        var lines: [String] = ["tell application \"Terminal\""]
-        lines.append("  try")
-        lines.append("    set W to window id \(wid)")
-        lines.append("    set T to selected tab of W")
+        let prof = escapeAS(profile)
+        var script = """
+        tell application "Terminal"
+          try
+            set W to window id \(wid)
+            set T to selected tab of W
+        """
         if let title, !title.isEmpty {
             let t = escapeAS(title)
-            lines.append("    try")
-            lines.append("      set custom title of W to \"\(t)\"")
-            lines.append("    end try")
-            lines.append("    try")
-            lines.append("      set custom title of T to \"\(t)\"")
-            lines.append("    end try")
+            script += """
+
+            try
+              set custom title of W to "\(t)"
+            end try
+            try
+              set custom title of T to "\(t)"
+            end try
+            """
         }
         if let c = colors {
             let bg = c.t16(c.bg)
             let tx = c.t16(c.text)
             let hi = c.t16(c.highlight)
-            // Live profile for this tab
-            lines.append("    try")
-            lines.append("      set S to current settings of T")
-            lines.append("      set background color of S to \(bg)")
-            lines.append("      set normal text color of S to \(tx)")
-            lines.append("      set bold text color of S to \(hi)")
-            lines.append("      set cursor color of S to \(hi)")
-            lines.append("    end try")
-            // Also try tab-level (some macOS builds)
-            lines.append("    try")
-            lines.append("      set background color of T to \(bg)")
-            lines.append("      set normal text color of T to \(tx)")
-            lines.append("      set bold text color of T to \(hi)")
-            lines.append("      set cursor color of T to \(hi)")
-            lines.append("    end try")
-            lines.append("    try")
-            lines.append("      set selected text color of current settings of T to \(hi)")
-            lines.append("    end try")
+            script += """
+
+            set setName to "\(prof)"
+            try
+              set theme to settings set setName
+            on error
+              set theme to make new settings set with properties {name:setName}
+            end try
+            set background color of theme to \(bg)
+            set normal text color of theme to \(tx)
+            set bold text color of theme to \(hi)
+            set cursor color of theme to \(hi)
+            try
+              set selected text color of theme to \(hi)
+            end try
+            set current settings of T to theme
+            """
         }
-        lines.append("  on error errMsg")
-        lines.append("    return \"ERR:\" & errMsg")
-        lines.append("  end try")
-        lines.append("  return \"OK\"")
-        lines.append("end tell")
-        let script = lines.joined(separator: "\n")
-        let out = Pong.osascript(script)
-        Pong.log("theme apply window=\(wid) title=\(title ?? "-") → \(out.isEmpty ? "(empty)" : out)")
+        script += """
+
+            return "OK"
+          on error errMsg
+            return "ERR:" & errMsg
+          end try
+        end tell
+        """
+        let out = Pong.osascript(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        Pong.log("theme apply window=\(wid) profile=\(profile) → \(out.isEmpty ? "(empty)" : out)")
     }
 
     static func applyPair(_ pair: String) {
@@ -601,19 +648,49 @@ enum TerminalTheme {
         let display = (entry["display_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let hermesTitle = (display?.isEmpty == false) ? "● \(display!) · Hermes" : "● Hermes · \(pair)"
         let hColors = Colors.from(entry["colors"]) ?? .hermesDefault
-        let hid = entry["hermes_window_id"].flatMap { v -> String? in
+        let storedH = entry["hermes_window_id"].flatMap { v -> String? in
             let s = "\(v)"; return (s == "<null>" || s.isEmpty) ? nil : s
         }
-        apply(windowId: hid, title: hermesTitle, colors: hColors)
+        let viewH = (entry["view_hermes"] as? String) ?? "\(pair)-h"
+        var claimed = Set<String>()
+        let hid = resolveWindowId(stored: storedH, hints: [viewH, "\(pair)-h", "HERMES ·", hermesTitle])
+        if let hid { claimed.insert(hid) }
+        apply(windowId: hid, title: hermesTitle, colors: hColors, profile: profileName(pair: pair, role: "hermes"))
 
-        let ws = Workers.list(from: entry)
-        for w in ws {
-            let wid = "\(w["window_id"] ?? "")"
-            let id = (w["id"] as? String) ?? "?"
-            let lab = (w["label"] as? String) ?? "Worker"
+        var ws = Workers.list(from: entry)
+        var changed = false
+        let views = (entry["view_workers"] as? [String]) ?? []
+        for i in 0..<ws.count {
+            let id = (ws[i]["id"] as? String) ?? "w\(i + 1)"
+            let lab = (ws[i]["label"] as? String) ?? "Worker"
+            let storedW = "\(ws[i]["window_id"] ?? "")"
+            let storedOpt = Int(storedW) != nil ? storedW : nil
+            var hints = [lab, id, "→ \(lab)", "WORKER · \(lab)"]
+            if i < views.count { hints.insert(views[i], at: 0) }
+            hints.append("\(pair)-w\(i)")
+            let wid = resolveWindowId(stored: storedOpt, hints: hints, avoid: claimed)
+            if let wid { claimed.insert(wid) }
             let title = "→ \(lab) · \(id)"
-            let cols = Colors.from(w["colors"]) ?? .workerDefault
-            apply(windowId: Int(wid) != nil ? wid : nil, title: title, colors: cols)
+            let cols = Colors.from(ws[i]["colors"]) ?? .workerDefault
+            apply(windowId: wid, title: title, colors: cols, profile: profileName(pair: pair, role: id))
+            if let wid, storedW != wid {
+                ws[i]["window_id"] = wid
+                changed = true
+            }
+        }
+        if changed || (hid != nil && hid != storedH) {
+            var db = PairState.loadPairsDb()
+            var e = db[pair] as? [String: Any] ?? entry
+            if let hid { e["hermes_window_id"] = hid }
+            e["workers"] = ws
+            if let first = ws.first { e["claude_window_id"] = first["window_id"] ?? NSNull() }
+            db[pair] = e
+            Pong.writeJSON(PairState.pairsPath, db)
+            var active = Pong.loadJSON(PairState.activePath)
+            if active["session"] as? String == pair {
+                for (k, v) in e { active[k] = v }
+                Pong.writeJSON(PairState.activePath, active)
+            }
         }
     }
 }
@@ -974,29 +1051,58 @@ enum Pairing {
             Pong.sh("tmux select-window -t \(name)-c:1")
         }
 
-        // Open Terminals one-by-one with full PATH (GUI Terminal often lacks homebrew).
-        func openAttach(_ session: String) -> String? {
+        // Open Terminals one-by-one.
+        // Never bare `activate` first — that spawns a blank extra window.
+        // Capture ids via before/after diff so workers never share one window id.
+        func openAttach(_ session: String, used: inout Set<String>) -> String? {
+            let before = Set(TerminalTheme.listWindows().map(\.id))
             let script = """
             tell application "Terminal"
-              activate
-              do script "\(pathExport); tmux attach-session -t \(session)"
-              delay 0.55
-              try
-                return id of front window as string
-              on error
-                return ""
-              end try
+              do script "\(pathExport); exec tmux attach-session -t \(session)"
+              delay 0.75
             end tell
             """
-            let out = Pong.osascript(script).trimmingCharacters(in: .whitespacesAndNewlines)
-            Pong.log("openAttach \(session) → \(out.isEmpty ? "(empty)" : out)")
-            return out.isEmpty ? nil : out
+            _ = Pong.osascript(script)
+            usleep(250_000)
+            let after = TerminalTheme.listWindows()
+            let fresh = after.filter { !before.contains($0.id) && !used.contains($0.id) }
+            if let best = fresh.last {
+                used.insert(best.id)
+                Pong.log("openAttach \(session) → \(best.id) (new) \(best.title)")
+                return best.id
+            }
+            if let hit = after.first(where: { !used.contains($0.id) && $0.title.contains(session) }) {
+                used.insert(hit.id)
+                Pong.log("openAttach \(session) → \(hit.id) (title)")
+                return hit.id
+            }
+            Pong.log("openAttach \(session) → FAILED")
+            return nil
         }
 
-        let hid = openAttach(viewH)
+        let baselineWindows = Set(TerminalTheme.listWindows().map(\.id))
+        var usedWindowIds = Set<String>()
+        let hid = openAttach(viewH, used: &usedWindowIds)
         var windowIds: [String] = []
         for vn in viewNames {
-            windowIds.append(openAttach(vn) ?? "")
+            windowIds.append(openAttach(vn, used: &usedWindowIds) ?? "")
+        }
+        // Close accidental blank windows created during launch
+        let afterAll = TerminalTheme.listWindows()
+        for w in afterAll where !baselineWindows.contains(w.id) && !usedWindowIds.contains(w.id) {
+            let t = w.title.lowercased()
+            if t.contains("tmux") || t.contains("hermes") || t.contains("worker")
+                || t.contains("claude") || t.contains("grok") || t.contains("kimi") {
+                continue
+            }
+            _ = Pong.osascript("""
+            tell application "Terminal"
+              try
+                close window id \(w.id)
+              end try
+            end tell
+            """)
+            Pong.log("closed stray Terminal window \(w.id) title=\(w.title)")
         }
         while windowIds.count < workerRecords.count { windowIds.append("") }
         // Stack Terminal windows vertically (Hermes on top, workers below)
