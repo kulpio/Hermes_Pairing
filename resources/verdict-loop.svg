@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 430" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2602f1"/>
+    </marker>
+    <marker id="arrowOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d97756"/>
+    </marker>
+    <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a8a94"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1a9c5b"/>
+    </marker>
+  </defs>
+
+  <!-- card background -->
+  <rect x="1" y="1" width="898" height="428" rx="18" fill="#ffffff" stroke="#e8e8ee"/>
+
+  <!-- HERMES orchestrator -->
+  <rect x="40" y="52" width="205" height="96" rx="14" fill="#f4f2ff" stroke="#2602f1" stroke-width="2"/>
+  <text x="142" y="88" text-anchor="middle" font-size="17" font-weight="700" fill="#2602f1">HERMES</text>
+  <text x="142" y="110" text-anchor="middle" font-size="13" fill="#5c5c66">orchestrator</text>
+  <text x="142" y="130" text-anchor="middle" font-size="12" fill="#5c5c66">sends the task</text>
+
+  <!-- CLAUDE CODE builder -->
+  <rect x="348" y="52" width="205" height="96" rx="14" fill="#fdf5f1" stroke="#d97756" stroke-width="2"/>
+  <text x="450" y="88" text-anchor="middle" font-size="17" font-weight="700" fill="#d97756">CLAUDE CODE</text>
+  <text x="450" y="110" text-anchor="middle" font-size="13" fill="#5c5c66">builder</text>
+  <text x="450" y="130" text-anchor="middle" font-size="12" fill="#5c5c66">ships + files a CLAIM</text>
+
+  <!-- HERMES detective -->
+  <rect x="656" y="52" width="205" height="96" rx="14" fill="#f4f2ff" stroke="#2602f1" stroke-width="2"/>
+  <text x="758" y="88" text-anchor="middle" font-size="17" font-weight="700" fill="#2602f1">HERMES 🔎</text>
+  <text x="758" y="110" text-anchor="middle" font-size="13" fill="#5c5c66">detective</text>
+  <text x="758" y="130" text-anchor="middle" font-size="12" fill="#5c5c66">runs the checks itself</text>
+
+  <!-- arrows across the top -->
+  <line x1="245" y1="100" x2="341" y2="100" stroke="#2602f1" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="293" y="84" text-anchor="middle" font-size="11" fill="#5c5c66">task +</text>
+  <text x="293" y="120" text-anchor="middle" font-size="11" fill="#5c5c66">criteria</text>
+
+  <line x1="553" y1="100" x2="649" y2="100" stroke="#d97756" stroke-width="2" marker-end="url(#arrowOrange)"/>
+  <text x="601" y="84" text-anchor="middle" font-size="10.5" fill="#5c5c66">##CLAUDE_DONE##</text>
+  <text x="601" y="120" text-anchor="middle" font-size="10.5" fill="#5c5c66">+ CLAIM block</text>
+
+  <!-- detective to decision -->
+  <line x1="758" y1="148" x2="758" y2="196" stroke="#2602f1" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- decision diamond -->
+  <polygon points="758,200 848,252 758,304 668,252" fill="#ffffff" stroke="#14141a" stroke-width="2"/>
+  <text x="758" y="246" text-anchor="middle" font-size="14" font-weight="700" fill="#14141a">criteria</text>
+  <text x="758" y="266" text-anchor="middle" font-size="14" font-weight="700" fill="#14141a">pass?</text>
+
+  <!-- NO path: loop back to Claude -->
+  <path d="M 668 252 L 450 252 L 450 155" fill="none" stroke="#c0392b" stroke-width="2" marker-end="url(#arrowGray)"/>
+  <text x="655" y="240" text-anchor="end" font-size="13" font-weight="700" fill="#c0392b">N</text>
+  <text x="545" y="276" text-anchor="middle" font-size="12" fill="#c0392b">REJECTED round N + exact evidence · fix only this</text>
+  <text x="545" y="294" text-anchor="middle" font-size="12" fill="#8a8a94">3 rejects → escalate to you with the full trail</text>
+
+  <!-- YES path: down to ledger -->
+  <line x1="758" y1="304" x2="758" y2="348" stroke="#1a9c5b" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="770" y="330" font-size="13" font-weight="700" fill="#1a9c5b">Y</text>
+
+  <!-- ledger -->
+  <rect x="656" y="352" width="205" height="58" rx="14" fill="#14141a"/>
+  <text x="758" y="376" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">✓ accept → ledger</text>
+  <text x="758" y="396" text-anchor="middle" font-size="11" fill="#b9b9c2">verdicts.jsonl · stays on your Mac</text>
+
+  <!-- ledger feeds the detective next loop -->
+  <path d="M 861 381 L 884 381 L 884 100 L 868 100" fill="none" stroke="#8a8a94" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrowGray)"/>
+  <text x="893" y="240" text-anchor="middle" font-size="11" fill="#8a8a94" transform="rotate(90 893 240)">failure patterns re-arm the detective every loop</text>
+</svg>

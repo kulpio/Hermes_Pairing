@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hermes Pong — Hermes + any AI terminal for Mac</title>
+  <meta name="description" content="Hermes orchestrates multi-worker teams on Mac — Claude, Kimi, Grok, Codex. Save teams, rename panes, colors, per-worker perms. Free forever — tip if you like." />
+  <meta property="og:title" content="Hermes Pong" />
+  <meta property="og:description" content="Multi-worker teams, Save/Show Teams, rename, colors, per-worker perms. Hermes + the terminals you already use. Free, tip optional." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="logo.png" />
+  <style>
+    :root {
+      --bg: #ffffff;
+      --card: #ffffff;
+      --text: #14141a;
+      --muted: #5c5c66;
+      --hermes: #2602f1;
+      --claude: #d97756;
+      --line: #e8e8ee;
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(ellipse 90% 55% at 50% -5%, rgba(217, 119, 86, 0.27), rgba(217, 119, 86, 0.07) 40%, transparent 70%),
+        radial-gradient(ellipse 70% 50% at 0% 100%, rgba(38, 2, 241, 0.22), rgba(38, 2, 241, 0.06) 45%, transparent 72%),
+        linear-gradient(180deg, #fffaf7 0%, #ffffff 38%, #fafbff 100%);
+      background-attachment: fixed;
+      color: var(--text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    a { color: inherit; }
+    .wrap {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 48px 20px 80px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 36px;
+      flex-wrap: wrap;
+    }
+    header .brand-block {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+    header img.logo {
+      width: 44px;
+      height: 44px;
+      border-radius: 0;
+      display: block;
+      flex-shrink: 0;
+      background: transparent;
+    }
+    header .brand {
+      font-weight: 750;
+      font-size: 1.15rem;
+      letter-spacing: -0.02em;
+      line-height: 1.2;
+    }
+    header .sub {
+      color: var(--muted);
+      font-size: .85rem;
+      margin-top: 2px;
+    }
+    header nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    header nav a {
+      text-decoration: none;
+      font-size: .88rem;
+      font-weight: 600;
+      color: var(--muted);
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      transition: color .12s ease, border-color .12s ease, background .12s ease;
+    }
+    header nav a:hover {
+      color: var(--text);
+      border-color: var(--line);
+      background: rgba(255,255,255,.7);
+    }
+    header nav a.gh {
+      color: #fff;
+      background: linear-gradient(135deg, var(--hermes), #5b43ff);
+      border-color: transparent;
+      box-shadow: 0 6px 16px rgba(38, 2, 241, 0.2);
+    }
+    header nav a.gh:hover {
+      color: #fff;
+      filter: brightness(1.05);
+      border-color: transparent;
+    }
+    .github-card {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }
+    .github-card .copy { flex: 1 1 220px; margin: 0; }
+    .github-card .copy strong { color: var(--text); }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 10px; }
+    .btn-inline {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-decoration: none;
+      font-weight: 650;
+      font-size: .92rem;
+      padding: 11px 16px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+      box-shadow: 0 2px 8px rgba(20,20,30,.04);
+    }
+    .btn-inline.primary {
+      background: linear-gradient(135deg, var(--hermes), #5b43ff);
+      border-color: transparent;
+      color: #fff;
+      box-shadow: 0 8px 22px rgba(38, 2, 241, 0.22);
+    }
+    .btn-inline:hover { transform: translateY(-1px); }
+    h1 {
+      font-size: clamp(2rem, 5vw, 2.75rem);
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      margin: 0 0 16px;
+      font-weight: 750;
+      color: var(--text);
+    }
+    .grad {
+      background: linear-gradient(105deg, var(--hermes) 0%, #5b43ff 40%, var(--claude) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .lead {
+      color: var(--muted);
+      font-size: 1.15rem;
+      max-width: 36em;
+      margin: 0 0 28px;
+    }
+    .lead strong { color: var(--text); }
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 32px;
+    }
+    .pill {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.72);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: .85rem;
+      color: var(--muted);
+      backdrop-filter: blur(6px);
+    }
+    .card {
+      background: rgba(255,255,255,.82);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 40px rgba(20, 20, 30, 0.04);
+      backdrop-filter: blur(8px);
+    }
+    .card h2 {
+      margin: 0 0 8px;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+    .card p {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: .95rem;
+    }
+    .price-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    @media (min-width: 560px) {
+      .price-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
+    .btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      text-decoration: none;
+      border-radius: 12px;
+      padding: 14px 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease;
+      min-height: 72px;
+      text-align: center;
+      color: var(--text);
+      box-shadow: 0 2px 8px rgba(20,20,30,.04);
+    }
+    .btn:hover {
+      transform: translateY(-1px);
+      border-color: #d0d0da;
+      box-shadow: 0 6px 16px rgba(20,20,30,.07);
+    }
+    .btn.primary {
+      background: linear-gradient(135deg, var(--hermes), #5b43ff);
+      border-color: transparent;
+      color: #fff;
+      box-shadow: 0 8px 22px rgba(38, 2, 241, 0.22);
+    }
+    .btn.primary:hover { filter: brightness(1.05); }
+    .btn.accent {
+      background: linear-gradient(135deg, #c96a48, var(--claude));
+      border-color: transparent;
+      color: #fff;
+      box-shadow: 0 8px 22px rgba(217, 119, 86, 0.25);
+    }
+    .btn .amt { font-weight: 700; font-size: 1.15rem; letter-spacing: -0.02em; }
+    .btn .hint { font-size: .75rem; color: rgba(255,255,255,.8); }
+    .btn:not(.primary):not(.accent) .hint { color: var(--muted); }
+    .note {
+      margin-top: 14px;
+      font-size: .85rem;
+      color: var(--muted);
+    }
+    .tip-tagline {
+      width: 100%;
+      margin: 0 0 14px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px dashed rgba(38, 2, 241, 0.22);
+      background: linear-gradient(105deg, rgba(38,2,241,.06), rgba(217,119,86,.08));
+      color: var(--text);
+      font-size: .98rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      text-align: center;
+      line-height: 1.35;
+    }
+    .tip-tagline span {
+      display: block;
+      margin-top: 4px;
+      font-weight: 500;
+      color: var(--muted);
+      font-size: .88rem;
+    }
+    .steps {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      counter-reset: s;
+    }
+    .steps li {
+      counter-increment: s;
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 12px;
+      padding: 10px 0;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .95rem;
+    }
+    .steps li:first-child { border-top: 0; }
+    .steps li::before {
+      content: counter(s);
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: rgba(38,2,241,.1);
+      color: var(--hermes);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .8rem;
+      font-weight: 700;
+    }
+    .steps strong { color: var(--text); font-weight: 600; }
+    footer {
+      margin-top: 40px;
+      color: var(--muted);
+      font-size: .85rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 20px;
+    }
+    footer a { color: var(--hermes); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* Vertical team diagram: Hermes on top, three workers under */
+    .team-diagram {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin: 28px 0 12px;
+    }
+    .terminal-window {
+      background: #f8f9fa;
+      border-radius: 10px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.1);
+      overflow: hidden;
+      border: 1px solid #ddd;
+    }
+    .terminal-window.hermes {
+      width: min(100%, 340px);
+    }
+    .terminal-header {
+      background: #e9ecef;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .terminal-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .terminal-dot.red { background: #ff5f56; }
+    .terminal-dot.yellow { background: #ffbd2e; }
+    .terminal-dot.green { background: #27c93f; }
+    .terminal-title {
+      flex: 1;
+      text-align: center;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #333;
+    }
+    .terminal-body {
+      padding: 14px 12px;
+      color: #222;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.9rem;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .terminal-body .role {
+      font-weight: 600;
+      color: var(--hermes);
+      font-size: .88rem;
+    }
+    .worker-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      max-width: 420px;
+    }
+    .terminal-window.worker {
+      width: 124px;
+      flex: 0 0 124px;
+    }
+    .terminal-window.worker .terminal-body {
+      padding: 12px 8px 14px;
+      min-height: 88px;
+    }
+    .model-logo {
+      width: 40px;
+      height: 40px;
+      object-fit: contain;
+      border-radius: 10px;
+      display: block;
+    }
+    .model-name {
+      font-size: .78rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: #333;
+    }
+    .team-blurb {
+      max-width: 34em;
+      margin: 0 auto 28px;
+      text-align: center;
+      color: var(--muted);
+      font-size: .98rem;
+      line-height: 1.45;
+    }
+    .team-blurb strong { color: var(--text); }
+
+    .feat-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      margin: 0;
+    }
+    @media (min-width: 560px) {
+      .feat-grid { grid-template-columns: 1fr 1fr; }
+    }
+    .feat {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px 16px;
+      background: #fff;
+    }
+    .feat strong {
+      display: block;
+      color: var(--text);
+      font-size: .95rem;
+      letter-spacing: -0.01em;
+      margin-bottom: 4px;
+    }
+    .feat span {
+      color: var(--muted);
+      font-size: .88rem;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand-block">
+        <img class="logo" src="logo.png" alt="Hermes Pong" />
+        <div>
+          <div class="brand">Hermes Pong</div>
+          <div class="sub">macOS · multi-worker teams · Hermes + your terminals</div>
+        </div>
+      </div>
+      <nav aria-label="Primary">
+        <a class="gh" href="https://github.com/kulpio/Hermes-Pong">GitHub</a>
+        <a href="https://github.com/kulpio/Hermes-Pong/blob/main/README.md">Docs</a>
+        <a href="https://github.com/kulpio/Hermes-Pong/releases/latest">Download</a>
+      </nav>
+    </header>
+
+    <h1>One orchestrator.<br /><span class="grad">A whole team.</span></h1>
+    <p class="lead">
+      <strong style="color:#2602f1">Hermes</strong> plans and verifies.
+      Your terminals build — <strong style="color:#d97756">Claude Code</strong> by default,
+      plus Kimi, Grok, Codex, or anything you already signed into.
+      Multi-worker teams, save &amp; reload, rename, colors, per-worker perms.
+      Model, resume, and context stay yours.
+    </p>
+
+    <!-- Vertical: Hermes on top, three model workers underneath -->
+    <div class="team-diagram" aria-hidden="true">
+      <div class="terminal-window hermes">
+        <div class="terminal-header">
+          <div class="terminal-dot red"></div>
+          <div class="terminal-dot yellow"></div>
+          <div class="terminal-dot green"></div>
+          <div class="terminal-title">Hermes</div>
+        </div>
+        <div class="terminal-body">
+          <img class="model-logo" src="logo.png" alt="" width="40" height="40" />
+          <span class="role">orchestrate · verify · assign</span>
+        </div>
+      </div>
+
+      <div class="worker-row">
+        <div class="terminal-window worker">
+          <div class="terminal-header">
+            <div class="terminal-dot red"></div>
+            <div class="terminal-dot yellow"></div>
+            <div class="terminal-dot green"></div>
+            <div class="terminal-title">w1</div>
+          </div>
+          <div class="terminal-body">
+            <img class="model-logo" src="claude-logo.png" alt="Claude" width="40" height="40" />
+            <span class="model-name">Claude</span>
+          </div>
+        </div>
+        <div class="terminal-window worker">
+          <div class="terminal-header">
+            <div class="terminal-dot red"></div>
+            <div class="terminal-dot yellow"></div>
+            <div class="terminal-dot green"></div>
+            <div class="terminal-title">w2</div>
+          </div>
+          <div class="terminal-body">
+            <img class="model-logo" src="grok-logo.svg" alt="Grok" width="40" height="40" />
+            <span class="model-name">Grok</span>
+          </div>
+        </div>
+        <div class="terminal-window worker">
+          <div class="terminal-header">
+            <div class="terminal-dot red"></div>
+            <div class="terminal-dot yellow"></div>
+            <div class="terminal-dot green"></div>
+            <div class="terminal-title">w3</div>
+          </div>
+          <div class="terminal-body">
+            <img class="model-logo" src="kimi-logo.svg" alt="Kimi" width="40" height="40" />
+            <span class="model-name">Kimi</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="team-blurb">
+      <strong>A team is one Hermes plus the workers you pick.</strong>
+      New pair → Team stacks Claude, Grok, Kimi (or anything you sign into) under a single hub.
+      Save the lineup, reopen it later with Show Teams, and route work with
+      <code style="font-size:.9em">pong-delegate --worker w2</code>.
+      Each pane can have its own name, colors, and perms.
+    </p>
+
+    <div class="pill-row">
+      <span class="pill">Claude · Other Model · Team</span>
+      <span class="pill">Save Team · Show Teams</span>
+      <span class="pill">Rename panes</span>
+      <span class="pill">Background · Text · Marker</span>
+      <span class="pill">Per-worker Perms</span>
+      <span class="pill">Local verdict ledger</span>
+      <span class="pill">Free forever</span>
+    </div>
+
+    <section class="card" id="get">
+      <h2>Get the app</h2>
+      <p>
+        Download is free. If it helps, leave a tip — same download either way.
+        Stripe checkout, then GitHub release.
+      </p>
+      <p class="tip-tagline">
+        Share a fraction of the savings you’ll make!
+        <span>Gotta feed those kiddos too lol</span>
+      </p>
+      <div class="price-grid">
+        <a class="btn primary" href="https://github.com/kulpio/Hermes-Pong/releases/latest/download/HermesPong-macOS.zip">
+          <span class="amt">$0</span>
+          <span class="hint">Free download</span>
+        </a>
+        <a class="btn" href="https://donate.stripe.com/7sYcN560Lb3acQX9xZ1B609">
+          <span class="amt">$10</span>
+          <span class="hint">Tip · edit amount</span>
+        </a>
+        <a class="btn accent" href="https://donate.stripe.com/fZufZhbl58V2cQX9xZ1B60a">
+          <span class="amt">$20</span>
+          <span class="hint">Tip · edit amount</span>
+        </a>
+        <a class="btn" href="https://donate.stripe.com/00wfZh3SD8V2g399xZ1B60b">
+          <span class="amt">$100</span>
+          <span class="hint">Tip · edit amount</span>
+        </a>
+      </div>
+      <p class="note">
+        Tips optional. Checkout asks for first name + email. On Stripe you can raise or lower the amount (min $1).
+        <a href="https://x.com/DDemnard" style="color:#2602f1">Follow on X</a><br>
+        After paying, Stripe sends you to the release page for the zip.
+        Or skip the tip and download free above.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li><div><strong>Install</strong> Hermes Pong on your Mac (unzip → Applications → open).</div></li>
+        <li><div><strong>New pair</strong> — Claude, Other Model, or <strong>Team</strong> (stack workers under one Hermes). Or <strong>Link</strong> terminals you already have open.</div></li>
+        <li><div><strong>Name &amp; color</strong> panes, set <strong>Perms</strong> per worker, then <strong>Save Team</strong> so <strong>Show Teams</strong> can open / duplicate / delete later.</div></li>
+        <li><div>Hermes hands tasks into the live worker window. A <strong>local verdict ledger</strong> records accepts &amp; rejects — nothing leaves your Mac.</div></li>
+      </ol>
+    </section>
+
+    <section class="card" id="features">
+      <h2>What&rsquo;s in v1.3</h2>
+      <p>Multi-worker teams and control-panel polish, shipped.</p>
+      <div class="feat-grid">
+        <div class="feat">
+          <strong>Teams</strong>
+          <span>One Hermes hub → many workers. Vertical Team picker. Terminals stack top to bottom.</span>
+        </div>
+        <div class="feat">
+          <strong>Save &amp; Show Teams</strong>
+          <span>Snapshot names, colors, workers, perms. Manager scrolls; open by click; Duplicate / Delete.</span>
+        </div>
+        <div class="feat">
+          <strong>Rename</strong>
+          <span>Click Hermes or a worker name in Active pairs. Titles hit Terminal + tmux for that pane only.</span>
+        </div>
+        <div class="feat">
+          <strong>Colors</strong>
+          <span>Background, Text, and Marker (bold/cursor accent). Private profile per role — no painting your other Terminals.</span>
+        </div>
+        <div class="feat">
+          <strong>Per-worker Perms</strong>
+          <span>Ban MCP / root / network / system paths, ask-each-time, freeform note. Full access &amp; Ask presets highlight when selected.</span>
+        </div>
+        <div class="feat">
+          <strong>Bridge</strong>
+          <span><code style="font-size:.85em">pong-delegate.py --worker w2</code> fans work to a specific worker. Verdict loop always on.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="army">
+      <h2>Not locked to one model</h2>
+      <p style="margin:0 0 12px">
+        Sign in wherever you already work. Pong pairs <strong>windows</strong>, not vendors.
+        Claude Code is the default worker; Kimi, Grok, Codex, DeepSeek, OpenRouter-backed CLIs,
+        or a custom command share the same bridge — alone or as a multi-worker team under one Hermes.
+      </p>
+      <p class="note" style="margin:0">
+        You own logins and sessions. Pong never stores model API keys.
+      </p>
+    </section>
+
+    <section class="card github-card" id="github">
+      <p class="copy">
+        <strong>Open source on GitHub.</strong>
+        Browse the code, file issues, or star the repo if the bridge helps.
+      </p>
+      <div class="btn-row">
+        <a class="btn-inline primary" href="https://github.com/kulpio/Hermes-Pong">View on GitHub</a>
+        <a class="btn-inline" href="https://github.com/kulpio/Hermes-Pong/releases/latest">Releases</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Requirements</h2>
+      <p style="margin:0">
+        macOS · Terminal.app ·
+        <a href="https://github.com/NousResearch/hermes-agent" style="color:#2602f1">Hermes</a> ·
+        worker CLIs (Claude Code default) · tmux
+      </p>
+      <p class="note" style="margin-top:12px;margin-bottom:0">
+        Signed &amp; notarized — unzip, drag to Applications, double-click to open.
+      </p>
+    </section>
+
+    <footer>
+      <a href="https://github.com/kulpio/Hermes-Pong">GitHub</a>
+      <a href="https://github.com/kulpio/Hermes-Pong/blob/main/README.md">Docs</a>
+      <a href="https://github.com/kulpio/Hermes-Pong/releases/latest">Releases</a>
+      <span>Built by Dylan · Boreal</span>
+    </footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Kimi">
+  <rect width="64" height="64" rx="14" fill="#1a1f36"/>
+  <circle cx="34" cy="32" r="16" fill="none" stroke="#7aa2ff" stroke-width="5"/>
+  <circle cx="26" cy="32" r="16" fill="#1a1f36"/>
+  <circle cx="38" cy="28" r="3.2" fill="#a8c0ff"/>
+</svg>

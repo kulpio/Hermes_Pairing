@@ -1,0 +1,23 @@
+# Hermes_Pairing
+.DS_Store
+venv/
+dist/
+*.pyc
+__pycache__/
+.Python
+*.egg-info/
+.idea/
+.vscode/
+*.log
+project_root
+.entitlements.plist
+*.app/
+resources/AppIcon.iconset/
+resources/menubar-*.png
+!resources/menubar-template.png
+!resources/menubar-template@2x.png
+resources/icon-master.png
+resources/brand/hermes-logo.png
+resources/brand/logo.png
+resources/brand/logo.svg
+resources/brand/favicon.ico
