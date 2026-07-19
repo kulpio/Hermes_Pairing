@@ -312,7 +312,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             TeamFocusController.shared.show(session: m.session)
         }
         canvas.onAddWorker = { [weak self] m in
-            self?.addWorker(to: m.session)
+            self?.handleAdd(from: m)
         }
         canvas.onDragStateChanged = { [weak self] dragging in
             self?.canvasDragging = dragging
@@ -582,17 +582,28 @@ final class PanelController: NSObject, NSWindowDelegate {
                 ))
             }
 
-            // + add worker handle near orchestrator
-            let addId = "add"
-            let addKey = CanvasLayout.key(session: session, nodeId: addId, multi: multi)
-            // Small + sits near bottom of orchestrator card (no edge drawn to it)
-            let addOrigin = posMap[addKey]
-                ?? CGPoint(x: cOrigin.x + 110, y: cOrigin.y - 8)
+            // + docked to orchestrator right edge (layoutDockedAddButtons snaps it)
             models.append(AgentNodeModel(
-                session: session, id: addId, role: "add",
+                session: session, id: "add", role: "add",
                 title: "+", subtitle: "worker", detail: "Add worker",
-                status: "idle", teamLabel: "", accent: PongTheme.magenta, origin: addOrigin
+                status: "idle", teamLabel: "", accent: PongTheme.magenta,
+                origin: CGPoint(x: cOrigin.x + AgentNodeView.size.width + 6,
+                                y: cOrigin.y + AgentNodeView.size.height / 2 - 14)
             ))
+            // + on each worker edge for subagents
+            for (i, w) in ws.enumerated() {
+                let wid = (w["id"] as? String) ?? "w\(i + 1)"
+                let wKey = CanvasLayout.key(session: session, nodeId: wid, multi: multi)
+                let wOrigin = posMap[wKey] ?? posMap[wid]
+                    ?? CanvasLayout.defaultPosition(teamIndex: ti, role: "worker", workerIndex: i, canvas: size, multi: multi)
+                models.append(AgentNodeModel(
+                    session: session, id: "add-sub-\(wid)", role: "add-sub",
+                    title: "+", subtitle: "subagent", detail: "Add subagent",
+                    status: "idle", teamLabel: "", accent: PongTheme.blue,
+                    origin: CGPoint(x: wOrigin.x + AgentNodeView.size.width + 6,
+                                    y: wOrigin.y + AgentNodeView.size.height / 2 - 14)
+                ))
+            }
         }
 
         canvas.reload(models: models, multiTeam: multi)
@@ -984,10 +995,20 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     private func addWorker(to session: String) {
+        addWorker(to: session, parentLabel: nil)
+    }
+
+    /// `parentLabel` set when adding a subagent under a worker (still a team peer for now).
+    private func addWorker(to session: String, parentLabel: String?) {
         NSApp.activate(ignoringOtherApps: true)
         let a = NSAlert()
-        a.messageText = "Add worker"
-        a.informativeText = "Launch a new worker CLI into this team."
+        if let parentLabel {
+            a.messageText = "Add subagent"
+            a.informativeText = "Under “\(parentLabel)” — launches as a team worker (peer) for now; hierarchy labels come next."
+        } else {
+            a.messageText = "Add worker"
+            a.informativeText = "Launch a new worker CLI attached to this orchestrator."
+        }
         for t in WorkerType.all where t.id != "custom" {
             a.addButton(withTitle: t.label)
         }
@@ -1009,6 +1030,20 @@ final class PanelController: NSObject, NSWindowDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             _ = Workers.addWorker(pair: session, type: wt)
             DispatchQueue.main.async { self.reload() }
+        }
+    }
+}
+
+// Extend canvas callback — add-sub uses parent worker context
+extension PanelController {
+    fileprivate func handleAdd(from m: AgentNodeModel) {
+        if m.role == "add-sub" {
+            let parentId = m.id.replacingOccurrences(of: "add-sub-", with: "")
+            let entry = PairState.loadPairsDb()[m.session] as? [String: Any] ?? [:]
+            let lab = Workers.list(from: entry).first(where: { ($0["id"] as? String) == parentId })?["label"] as? String
+            addWorker(to: m.session, parentLabel: lab ?? parentId)
+        } else {
+            addWorker(to: m.session, parentLabel: nil)
         }
     }
 }

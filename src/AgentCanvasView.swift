@@ -99,7 +99,8 @@ final class AgentNodeView: NSView {
     private var buttons: [NSButton] = []
 
     static let size = NSSize(width: 256, height: 148)
-    static let addSize = NSSize(width: 32, height: 32)
+    /// Compact dock chip on card edge (not a free-floating blob)
+    static let addSize = NSSize(width: 28, height: 28)
 
     override var mouseDownCanMoveWindow: Bool { false }
 
@@ -126,21 +127,22 @@ final class AgentNodeView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func buildAddStyle() {
-        layer?.backgroundColor = PongTheme.magentaSoft.cgColor
-        layer?.borderColor = PongTheme.magenta.withAlphaComponent(0.55).cgColor
-        layer?.shadowColor = PongTheme.magenta.cgColor
-        layer?.shadowOpacity = 0.35
-        layer?.shadowRadius = 8
+        let isSub = model.role == "add-sub"
+        layer?.backgroundColor = (isSub ? PongTheme.blueSoft : PongTheme.magentaSoft).cgColor
+        layer?.borderColor = (isSub ? PongTheme.blue : PongTheme.magenta).withAlphaComponent(0.6).cgColor
+        layer?.shadowColor = (isSub ? PongTheme.blue : PongTheme.magenta).cgColor
+        layer?.shadowOpacity = 0.3
+        layer?.shadowRadius = 6
         layer?.shadowOffset = .zero
         let plus = NSTextField(labelWithString: "+")
-        plus.font = PongTheme.font(16, weight: .semibold)
-        plus.textColor = PongTheme.magenta
+        plus.font = PongTheme.font(14, weight: .semibold)
+        plus.textColor = isSub ? PongTheme.blue : PongTheme.magenta
         plus.alignment = .center
-        plus.frame = NSRect(x: 0, y: 5, width: 32, height: 22)
+        plus.frame = NSRect(x: 0, y: 4, width: 28, height: 20)
         plus.isEditable = false
         plus.isBordered = false
         plus.backgroundColor = .clear
-        plus.toolTip = "Add worker"
+        plus.toolTip = isSub ? "Add subagent under this worker" : "Add worker to orchestrator"
         addSubview(plus)
     }
 
@@ -285,7 +287,7 @@ final class AgentNodeView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        if model.role == "add" {
+        if model.role == "add" || model.role == "add-sub" {
             onAddWorker?(model)
             return
         }
@@ -310,7 +312,10 @@ final class AgentNodeView: NSView {
         nx = min(max(8, nx), max(8, superV.bounds.width - bounds.width - 8))
         ny = min(max(8, ny), max(8, superV.bounds.height - bounds.height - 8))
         setFrameOrigin(NSPoint(x: nx, y: ny))
-        (superview as? AgentCanvasView)?.needsDisplay = true
+        if let canvas = superview as? AgentCanvasView {
+            canvas.layoutDockedAddButtons()
+            canvas.needsDisplay = true
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -478,10 +483,12 @@ final class AgentCanvasView: NSView {
         path.stroke()
         path.setLineDash(nil, count: 0, phase: 0)
 
-        let r: CGFloat = 3
+        // Direction arrow at destination (flow: from → to)
+        drawArrowHead(at: to, from: from, color: color)
+
+        let r: CGFloat = 2.5
         color.setFill()
         NSBezierPath(ovalIn: NSRect(x: from.x - r, y: from.y - r, width: r * 2, height: r * 2)).fill()
-        NSBezierPath(ovalIn: NSRect(x: to.x - r, y: to.y - r, width: r * 2, height: r * 2)).fill()
 
         // Flow caption at curve mid
         guard !label.isEmpty else { return }
@@ -505,6 +512,21 @@ final class AgentCanvasView: NSView {
         s.draw(at: labelOrigin)
     }
 
+    private func drawArrowHead(at tip: NSPoint, from: NSPoint, color: NSColor) {
+        let angle = atan2(tip.y - from.y, tip.x - from.x)
+        let len: CGFloat = 10
+        let spread: CGFloat = .pi / 7
+        let p1 = NSPoint(x: tip.x - len * cos(angle - spread), y: tip.y - len * sin(angle - spread))
+        let p2 = NSPoint(x: tip.x - len * cos(angle + spread), y: tip.y - len * sin(angle + spread))
+        let arrow = NSBezierPath()
+        arrow.move(to: tip)
+        arrow.line(to: p1)
+        arrow.line(to: p2)
+        arrow.close()
+        color.withAlphaComponent(0.9).setFill()
+        arrow.fill()
+    }
+
     func reload(models: [AgentNodeModel], multiTeam: Bool) {
         if isDragging { return }
         self.multiTeam = multiTeam
@@ -517,7 +539,6 @@ final class AgentCanvasView: NSView {
         for m in models {
             if let existing = nodeViews[m.globalId] {
                 existing.apply(m)
-                // update model reference via re-init is hard; origin already applied
             } else {
                 let v = AgentNodeView(model: m)
                 wire(v)
@@ -525,11 +546,46 @@ final class AgentCanvasView: NSView {
                 nodeViews[m.globalId] = v
             }
         }
+        layoutDockedAddButtons()
         needsDisplay = true
     }
 
+    /// Keep + chips glued to the right edge of their parent card (never free-float).
+    func layoutDockedAddButtons() {
+        for m in models where m.role == "add" || m.role == "add-sub" {
+            guard let av = nodeViews[m.globalId] else { continue }
+            let parentId: String
+            if m.role == "add" {
+                // dock to orchestrator
+                guard let c = models.first(where: { $0.session == m.session && $0.role == "conductor" }),
+                      let cv = nodeViews[c.globalId] else { continue }
+                parentId = c.globalId
+                _ = parentId
+                let o = CGPoint(
+                    x: cv.frame.maxX + 6,
+                    y: cv.frame.midY - av.bounds.height / 2
+                )
+                av.setFrameOrigin(o)
+            } else {
+                // add-sub: dock to worker named in m.id after "add-sub-"
+                let workerId = m.id.replacingOccurrences(of: "add-sub-", with: "")
+                guard let w = models.first(where: { $0.session == m.session && $0.id == workerId }),
+                      let wv = nodeViews[w.globalId] else { continue }
+                let o = CGPoint(
+                    x: wv.frame.maxX + 6,
+                    y: wv.frame.midY - av.bounds.height / 2
+                )
+                av.setFrameOrigin(o)
+            }
+        }
+    }
+
     private func wire(_ v: AgentNodeView) {
-        v.onMoved = { [weak self] m, origin in self?.persist(m, origin: origin) }
+        v.onMoved = { [weak self] m, origin in
+            self?.persist(m, origin: origin)
+            self?.layoutDockedAddButtons()
+            self?.needsDisplay = true
+        }
         v.onFront = { [weak self] m in self?.onFront?(m) }
         v.onKill = { [weak self] m in self?.onKill?(m) }
         v.onOptions = { [weak self] m in self?.onOptions?(m) }
@@ -543,14 +599,17 @@ final class AgentCanvasView: NSView {
         v.onDragEnded = { [weak self] in
             self?.isDragging = false
             self?.onDragStateChanged?(false)
+            self?.layoutDockedAddButtons()
+            self?.needsDisplay = true
         }
     }
 
     private func persist(_ m: AgentNodeModel, origin: CGPoint) {
+        // Don't persist free positions for docked + chips
+        if m.role == "add" || m.role == "add-sub" { return }
         var pos = CanvasLayout.positions(for: multiTeam ? nil : m.session)
         let key = CanvasLayout.key(session: m.session, nodeId: m.id, multi: multiTeam)
         pos[key] = origin
-        // also bare id for single-team compat
         if !multiTeam { pos[m.id] = origin }
         CanvasLayout.save(session: multiTeam ? nil : m.session, positions: pos, multi: multiTeam)
         if let i = models.firstIndex(where: { $0.globalId == m.globalId }) {
@@ -561,6 +620,7 @@ final class AgentCanvasView: NSView {
 
     override func layout() {
         super.layout()
+        layoutDockedAddButtons()
         needsDisplay = true
     }
 }
