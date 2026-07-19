@@ -194,7 +194,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         headerTitle = Self.label("Pong", frame: .zero, bold: true, size: 17)
         headerView.addSubview(headerTitle)
 
-        headerSub = Self.label("Agent mission control", frame: .zero, size: 11, secondary: true)
+        headerSub = Self.label("Orchestration control", frame: .zero, size: 11, secondary: true)
         headerView.addSubview(headerSub)
 
         headerPill = NSView(frame: .zero)
@@ -467,8 +467,12 @@ final class PanelController: NSObject, NSWindowDelegate {
         b.wantsLayer = true
         b.layer?.backgroundColor = PongTheme.accent.cgColor
         b.layer?.cornerRadius = PongTheme.radiusBtn
+        b.layer?.shadowColor = PongTheme.accent.cgColor
+        b.layer?.shadowOpacity = 0.35
+        b.layer?.shadowRadius = 8
+        b.layer?.shadowOffset = .zero
         b.attributedTitle = NSAttributedString(string: title, attributes: [
-            .foregroundColor: PongTheme.accentInk,
+            .foregroundColor: NSColor.white,
             .font: PongTheme.font(12, weight: .semibold),
         ])
         b.target = self
@@ -624,11 +628,19 @@ final class PanelController: NSObject, NSWindowDelegate {
         let cOrigin = saved[condId] ?? CanvasLayout.defaultPosition(role: "conductor", index: 0, canvas: size)
         let cAccent = TerminalTheme.Colors.from(entry["colors"])?.asNSColors.hi
             ?? NSColor(calibratedRed: 0.55, green: 0.45, blue: 0.95, alpha: 1)
+        let root = (entry["project_root"] as? String) ?? ""
+        let brief = (entry["team_brief"] as? String) ?? ""
+        let condDetail: String = {
+            if !brief.isEmpty { return String(brief.prefix(90)) }
+            if !root.isEmpty { return root }
+            return "Plans, fans out jobs, verifies claims"
+        }()
         models.append(AgentNodeModel(
             id: condId,
             role: "conductor",
             title: condLabel,
             subtitle: "\(condType) · orchestra",
+            detail: condDetail,
             status: stowed ? "hidden" : "live",
             accent: cAccent,
             origin: cOrigin
@@ -641,9 +653,9 @@ final class PanelController: NSObject, NSWindowDelegate {
             let typ = (w["type"] as? String) ?? "worker"
             let origin = saved[wid] ?? CanvasLayout.defaultPosition(role: "worker", index: i, canvas: size)
             let accent = TerminalTheme.Colors.from(w["colors"])?.asNSColors.hi
-                ?? NSColor(calibratedRed: 0.3, green: 0.7, blue: 0.9, alpha: 1)
-            // Status from snapshot if available
+                ?? PongTheme.accent
             var status = "idle"
+            var detail = "Implements tasks from the conductor"
             if let snap = lastSnapshotCache,
                let teams = snap["teams"] as? [[String: Any]],
                let team = teams.first(where: { ($0["session"] as? String) == session }),
@@ -651,13 +663,17 @@ final class PanelController: NSObject, NSWindowDelegate {
                let match = workers.first(where: { ($0["id"] as? String) == wid }) {
                 status = (match["status_hint"] as? String) ?? status
                 let oj = match["open_jobs"] as? Int ?? 0
-                if oj > 0 { status = "\(status) · \(oj) job\(oj == 1 ? "" : "s")" }
+                if oj > 0 {
+                    status = "busy"
+                    detail = "\(oj) open job\(oj == 1 ? "" : "s") in queue"
+                }
             }
             models.append(AgentNodeModel(
                 id: wid,
                 role: "worker",
                 title: lab,
                 subtitle: typ,
+                detail: detail,
                 status: status,
                 accent: accent,
                 origin: origin
@@ -755,102 +771,155 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func rebuildMission() {
         guard let missionList else { return }
         missionList.subviews.forEach { $0.removeFromSuperview() }
-        let boxW = max(320, missionScroll.contentSize.width > 0 ? missionScroll.contentSize.width : 500)
+        let boxW = max(360, missionScroll.contentSize.width > 0 ? missionScroll.contentSize.width : 520)
         let snap = loadSnapshot()
         let teams = (snap["teams"] as? [[String: Any]]) ?? []
         let ledger = (snap["ledger"] as? [String: Any]) ?? [:]
         let bridgeOn = (snap["bridge_on"] as? Bool) == true
         let bridge = (snap["bridge"] as? String) ?? ""
+        let events = (snap["events_tail"] as? [[String: Any]]) ?? []
 
         var blocks: [NSView] = []
         var totalH: CGFloat = 12
 
-        func card(_ h: CGFloat) -> NSView {
-            let v = NSView(frame: NSRect(x: 0, y: 0, width: boxW, height: h))
-            PongTheme.applyCard(v)
-            return v
-        }
+        // Title row
+        let head = NSView(frame: NSRect(x: 0, y: 0, width: boxW, height: 40))
+        head.addSubview(Self.label("Workflow dashboard",
+            frame: NSRect(x: 0, y: 16, width: 240, height: 20), bold: true, size: 16))
+        head.addSubview(Self.label(bridgeOn ? "Bridge live" : "Bridge idle",
+            frame: NSRect(x: boxW - 120, y: 18, width: 120, height: 16), size: 11, secondary: true))
+        blocks.append(head)
+        totalH += 48
 
-        let bridgeCard = card(64)
-        bridgeCard.addSubview(Self.label(bridgeOn ? "Bridge on" : "Bridge off",
-            frame: NSRect(x: 14, y: 34, width: 200, height: 18), bold: true, size: 13))
-        bridgeCard.addSubview(Self.label(bridge.isEmpty ? "No bound session" : bridge,
-            frame: NSRect(x: 14, y: 12, width: boxW - 28, height: 18), size: 10, secondary: true))
-        let dot = NSView(frame: NSRect(x: boxW - 28, y: 28, width: 10, height: 10))
-        dot.wantsLayer = true
-        dot.layer?.cornerRadius = 5
-        dot.layer?.backgroundColor = (bridgeOn ? PongTheme.live : PongTheme.idle).cgColor
-        bridgeCard.addSubview(dot)
-        blocks.append(bridgeCard)
-        totalH += 74
-
+        // Metric tiles (2×2 style row)
         let rounds = ledger["rounds"] as? Int ?? 0
         let rate = ledger["accept_rate"] as? Double ?? 0
         let streak = ledger["reject_streak"] as? Int ?? 0
-        let ledCard = card(56)
-        ledCard.addSubview(Self.label("Verdict ledger",
-            frame: NSRect(x: 14, y: 30, width: 160, height: 16), bold: true, size: 12))
-        ledCard.addSubview(Self.label(
-            "\(rounds) rounds · \(Int(rate * 100))% accept · reject streak \(streak)",
-            frame: NSRect(x: 14, y: 10, width: boxW - 28, height: 16), size: 11, secondary: true))
-        blocks.append(ledCard)
-        totalH += 66
-
-        if teams.isEmpty {
-            let empty = card(72)
-            empty.addSubview(Self.label("No team data",
-                frame: NSRect(x: 14, y: 38, width: boxW - 28, height: 18), bold: true, size: 13))
-            empty.addSubview(Self.label("Start a team on the Canvas tab.",
-                frame: NSRect(x: 14, y: 16, width: boxW - 28, height: 16), size: 11, secondary: true))
-            blocks.append(empty)
-            totalH += 82
+        var openJobs = 0
+        var agents = 0
+        for t in teams {
+            openJobs += (t["jobs"] as? [String: Any]).flatMap { ($0["counts"] as? [String: Any])?["open"] as? Int } ?? 0
+            agents += ((t["workers"] as? [[String: Any]])?.count ?? 0) + 1
         }
+        let gap: CGFloat = 10
+        let tileW = (boxW - gap) / 2
+        let metrics = NSView(frame: NSRect(x: 0, y: 0, width: boxW, height: 148))
+        let tiles: [(String, String, String)] = [
+            ("Open jobs", "\(openJobs)", "queued · notified · running"),
+            ("Accept rate", "\(Int(rate * 100))%", "\(rounds) verdict rounds"),
+            ("Agents", "\(agents)", "\(teams.count) team\(teams.count == 1 ? "" : "s")"),
+            ("Reject streak", "\(streak)", bridge.isEmpty ? "—" : String(bridge.prefix(28))),
+        ]
+        for (i, t) in tiles.enumerated() {
+            let col = i % 2
+            let row = i / 2
+            let x = CGFloat(col) * (tileW + gap)
+            let y = CGFloat(1 - row) * (70 + gap)
+            let tile = NSView(frame: NSRect(x: x, y: y, width: tileW, height: 70))
+            PongTheme.applyMetricCard(tile)
+            // accent top hairline
+            let accent = NSView(frame: NSRect(x: 0, y: 68, width: tileW, height: 2))
+            accent.wantsLayer = true
+            accent.layer?.backgroundColor = (i == 0 ? PongTheme.accent : (i == 1 ? PongTheme.live : PongTheme.borderStrong)).cgColor
+            tile.addSubview(accent)
+            tile.addSubview(Self.label(t.0, frame: NSRect(x: 12, y: 44, width: tileW - 24, height: 14), size: 10, secondary: true))
+            let val = Self.label(t.1, frame: NSRect(x: 12, y: 18, width: tileW - 24, height: 24), bold: true, size: 22)
+            tile.addSubview(val)
+            tile.addSubview(Self.label(t.2, frame: NSRect(x: 12, y: 4, width: tileW - 24, height: 12), size: 9, secondary: true))
+            metrics.addSubview(tile)
+        }
+        blocks.append(metrics)
+        totalH += 158
 
+        // Recent executions
+        let showEvents = Array(events.suffix(6).reversed())
+        let execH: CGFloat = 36 + CGFloat(max(showEvents.count, 1)) * 28
+        let exec = NSView(frame: NSRect(x: 0, y: 0, width: boxW, height: execH))
+        PongTheme.applyCard(exec)
+        exec.addSubview(Self.label("Recent activity",
+            frame: NSRect(x: 14, y: execH - 28, width: 200, height: 18), bold: true, size: 13))
+        if showEvents.isEmpty {
+            exec.addSubview(Self.label("No events yet — create a job from the conductor.",
+                frame: NSRect(x: 14, y: 14, width: boxW - 28, height: 16), size: 11, secondary: true))
+        } else {
+            var ey = execH - 48
+            for e in showEvents {
+                let t = (e["type"] as? String) ?? "event"
+                let jid = (e["job_id"] as? String) ?? ""
+                let st = (e["status"] as? String) ?? (e["verdict"] as? String) ?? ""
+                let line = [t, jid, st].filter { !$0.isEmpty }.joined(separator: "  ·  ")
+                let row = NSView(frame: NSRect(x: 10, y: ey, width: boxW - 20, height: 24))
+                row.wantsLayer = true
+                row.layer?.backgroundColor = PongTheme.bgInput.cgColor
+                row.layer?.cornerRadius = 8
+                let pill = NSView(frame: NSRect(x: 8, y: 6, width: 6, height: 12))
+                pill.wantsLayer = true
+                pill.layer?.cornerRadius = 3
+                pill.layer?.backgroundColor = PongTheme.accent.cgColor
+                row.addSubview(pill)
+                row.addSubview(Self.label(line,
+                    frame: NSRect(x: 22, y: 4, width: boxW - 50, height: 16), size: 10, secondary: true))
+                exec.addSubview(row)
+                ey -= 28
+            }
+        }
+        blocks.append(exec)
+        totalH += execH + 12
+
+        // Per-team open jobs
         for team in teams {
             let session = (team["session"] as? String) ?? "?"
             let display = (team["display_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? session
             let cond = team["conductor"] as? [String: Any]
             let condLabel = (cond?["label"] as? String) ?? "Conductor"
             let jobs = team["jobs"] as? [String: Any] ?? [:]
-            let openJobs = (jobs["open"] as? [[String: Any]]) ?? []
-            let openN = (jobs["counts"] as? [String: Any])?["open"] as? Int ?? openJobs.count
+            let openList = (jobs["open"] as? [[String: Any]]) ?? []
+            let openN = (jobs["counts"] as? [String: Any])?["open"] as? Int ?? openList.count
             let workers = (team["workers"] as? [[String: Any]]) ?? []
-            let jobRows = max(openJobs.count, 1)
-            let cardH: CGFloat = 64 + CGFloat(workers.count) * 20 + CGFloat(jobRows) * 28
-            let c = card(cardH)
+            let h: CGFloat = 56 + CGFloat(max(openList.count, 1)) * 28 + CGFloat(workers.count) * 16
+            let c = NSView(frame: NSRect(x: 0, y: 0, width: boxW, height: h))
+            PongTheme.applyCard(c, accentBorder: true)
             c.addSubview(Self.label(display,
-                frame: NSRect(x: 14, y: cardH - 26, width: boxW - 40, height: 18), bold: true, size: 13))
-            c.addSubview(Self.label("\(condLabel) · \(openN) open",
-                frame: NSRect(x: 14, y: cardH - 42, width: boxW - 40, height: 14), size: 10, secondary: true))
-            var ly = cardH - 54
-            for w in workers {
+                frame: NSRect(x: 14, y: h - 26, width: boxW - 40, height: 18), bold: true, size: 13))
+            c.addSubview(Self.label("\(condLabel)  ·  \(openN) open  ·  \(workers.count) workers",
+                frame: NSRect(x: 14, y: h - 42, width: boxW - 40, height: 14), size: 10, secondary: true))
+            var ly = h - 56
+            for w in workers.prefix(4) {
                 let lab = (w["label"] as? String) ?? "?"
                 let hint = (w["status_hint"] as? String) ?? "idle"
-                ly -= 18
-                c.addSubview(Self.label("\(lab) · \(hint)",
-                    frame: NSRect(x: 14, y: ly, width: boxW - 28, height: 16), size: 11, secondary: true))
+                let sk = PongTheme.statusKind(hint)
+                ly -= 16
+                c.addSubview(Self.label("\(lab)  \(sk.label)",
+                    frame: NSRect(x: 14, y: ly, width: boxW - 28, height: 14), size: 10, secondary: true))
             }
-            ly -= 6
-            if openJobs.isEmpty {
-                ly -= 22
-                c.addSubview(Self.label("No open jobs",
+            if openList.isEmpty {
+                ly -= 28
+                c.addSubview(Self.label("No open jobs — pong job create from conductor",
                     frame: NSRect(x: 14, y: ly, width: boxW - 28, height: 18), size: 10, secondary: true))
             } else {
-                for j in openJobs.prefix(8) {
-                    ly -= 26
+                for j in openList.prefix(6) {
+                    ly -= 28
                     let st = (j["status"] as? String) ?? "?"
                     let prev = (j["task_preview"] as? String) ?? (j["id"] as? String) ?? ""
-                    let row = NSView(frame: NSRect(x: 10, y: ly, width: boxW - 20, height: 22))
+                    let row = NSView(frame: NSRect(x: 10, y: ly, width: boxW - 20, height: 24))
                     row.wantsLayer = true
                     row.layer?.backgroundColor = PongTheme.bgInput.cgColor
-                    row.layer?.cornerRadius = 6
-                    row.addSubview(Self.label(st, frame: NSRect(x: 8, y: 3, width: 70, height: 16), size: 10))
-                    row.addSubview(Self.label(prev, frame: NSRect(x: 82, y: 3, width: boxW - 120, height: 16), size: 10, secondary: true))
+                    row.layer?.cornerRadius = 8
+                    let sk = PongTheme.statusKind(st)
+                    let badge = NSTextField(labelWithString: sk.label)
+                    badge.font = PongTheme.font(9, weight: .bold)
+                    badge.textColor = sk.color
+                    badge.frame = NSRect(x: 8, y: 4, width: 64, height: 16)
+                    badge.isBordered = false
+                    badge.backgroundColor = .clear
+                    row.addSubview(badge)
+                    row.addSubview(Self.label(prev,
+                        frame: NSRect(x: 78, y: 4, width: boxW - 110, height: 16), size: 10, secondary: true))
                     c.addSubview(row)
                 }
             }
             blocks.append(c)
-            totalH += cardH + 10
+            totalH += h + 12
         }
 
         let contentH = max(missionScroll.contentSize.height, totalH + 24)
