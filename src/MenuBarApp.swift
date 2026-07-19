@@ -465,6 +465,87 @@ enum Workers {
         Pong.log("worker perms \(pair)/\(workerId)")
     }
 
+    /// Launch a new worker CLI into an existing team (new tmux window + Terminal).
+    @discardableResult
+    static func addWorker(pair: String, type: WorkerType) -> String? {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        var ws = list(from: entry)
+        let nextIdx = ws.count + 1
+        let wid = "w\(nextIdx)"
+        // avoid id collision
+        var id = wid
+        var n = nextIdx
+        while ws.contains(where: { ($0["id"] as? String) == id }) {
+            n += 1
+            id = "w\(n)"
+        }
+        let tmuxIndex = (ws.compactMap { $0["tmux_index"] as? Int }.max() ?? 0) + 1
+        let cmd = type.cmd.trimmingCharacters(in: .whitespacesAndNewlines)
+        let launch = cmd.isEmpty ? "claude" : cmd
+        let pathExport = "export PATH=/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.local/bin:$PATH"
+        let safeCmd = launch.replacingOccurrences(of: "'", with: "'\\''")
+
+        // Ensure base tmux session exists
+        Pong.sh("tmux has-session -t \(pair) 2>/dev/null || tmux new-session -d -s \(pair) -n Conductor")
+        let winName = "W\(n)"
+        Pong.sh("tmux new-window -t \(pair) -n \(winName)")
+        // attach window index: use last window
+        let idxOut = Pong.sh("tmux display-message -p -t \(pair) '#{window_index}' 2>/dev/null || echo \(tmuxIndex)")
+        let actualIdx = Int(idxOut.trimmingCharacters(in: .whitespacesAndNewlines)) ?? tmuxIndex
+        Pong.sh("tmux send-keys -t \(pair):\(actualIdx) -l '\(pathExport); export PONG_SESSION=\(pair) HERMES_PONG_SESSION=\(pair); printf \"\\n  WORKER · \(type.label) · \(pair):\(actualIdx)\\n\\n\"; \(safeCmd)'")
+        usleep(80_000)
+        Pong.sh("tmux send-keys -t \(pair):\(actualIdx) Enter")
+
+        // Open Terminal attached to this window view
+        let view = "\(pair)-w\(actualIdx - 1)"
+        Pong.sh("tmux has-session -t \(view) 2>/dev/null || tmux new-session -d -s \(view) -t \(pair)")
+        Pong.sh("tmux select-window -t \(view):\(actualIdx) 2>/dev/null || tmux select-window -t \(pair):\(actualIdx)")
+        let before = Set(TerminalTheme.listWindows().map(\.id))
+        _ = Pong.osascript("""
+        tell application "Terminal"
+          do script "\(pathExport); exec tmux attach-session -t \(view)"
+          delay 0.6
+        end tell
+        """)
+        usleep(300_000)
+        let after = TerminalTheme.listWindows()
+        let newId = after.first(where: { !before.contains($0.id) })?.id
+            ?? after.last(where: { $0.title.contains(view) || $0.title.contains(pair) })?.id
+
+        let rec = makeWorker(
+            id: id,
+            type: type.id,
+            label: type.label,
+            windowId: newId ?? "",
+            mode: "tmux",
+            cmd: launch,
+            tmuxIndex: actualIdx
+        )
+        var recMut = rec
+        if newId == nil { recMut["window_id"] = NSNull() }
+        else { recMut["window_id"] = newId! }
+        ws.append(recMut)
+        entry["workers"] = ws
+        entry["updated"] = Date().timeIntervalSince1970
+        if let first = ws.first {
+            entry["claude_window_id"] = first["window_id"] ?? NSNull()
+            entry["worker_window_id"] = first["window_id"] ?? NSNull()
+        }
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        var active = Pong.loadJSON(PairState.activePath)
+        if active["session"] as? String == pair || active["session"] == nil {
+            active = entry
+            active["session"] = pair
+            Pong.writeJSON(PairState.activePath, active)
+        }
+        Pong.sh("python3 $HOME/bin/hermes_pong.py write-bind --session \(pair) >/dev/null 2>&1 || true")
+        Pong.log("addWorker \(pair)/\(id) type=\(type.id) window=\(newId ?? "-")")
+        TerminalTheme.applyPair(pair)
+        return id
+    }
+
     /// Remove one worker from the team; kill its view session. Pair stays if workers remain.
     @discardableResult
     static func removeWorker(pair: String, workerId: String) -> Bool {

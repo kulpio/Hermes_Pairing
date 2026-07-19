@@ -299,18 +299,23 @@ final class PanelController: NSObject, NSWindowDelegate {
         canvasScroll.borderType = .noBorder
         canvasScroll.drawsBackground = false
         canvasScroll.backgroundColor = .clear
-        canvas = AgentCanvasView(frame: NSRect(x: 0, y: 0, width: 1400, height: 1000))
-        canvas.onFront = { [weak self] s, id in self?.frontNode(session: s, id: id) }
-        canvas.onKill = { [weak self] s, id in self?.killNode(session: s, id: id) }
-        canvas.onOptions = { [weak self] s in
-            TeamOptionsSheetController.shared.show(for: s) { self?.reload() }
+        canvas = AgentCanvasView(frame: NSRect(x: 0, y: 0, width: 1600, height: 1100))
+        canvas.onFront = { [weak self] m in self?.frontModel(m) }
+        canvas.onKill = { [weak self] m in self?.killModel(m) }
+        canvas.onOptions = { [weak self] m in
+            TeamOptionsSheetController.shared.show(for: m.session) { self?.reload() }
         }
-        canvas.onPerms = { [weak self] s, w in
-            PermissionsSheetController.shared.show(for: s, workerId: w) { self?.reload() }
+        canvas.onPerms = { [weak self] m in
+            PermissionsSheetController.shared.show(for: m.session, workerId: m.id) { self?.reload() }
+        }
+        canvas.onFocus = { m in
+            TeamFocusController.shared.show(session: m.session)
+        }
+        canvas.onAddWorker = { [weak self] m in
+            self?.addWorker(to: m.session)
         }
         canvas.onDragStateChanged = { [weak self] dragging in
             self?.canvasDragging = dragging
-            // Prevent scroll view from fighting the drag
             self?.canvasScroll.hasVerticalScroller = !dragging
             self?.canvasScroll.hasHorizontalScroller = !dragging
         }
@@ -469,6 +474,9 @@ final class PanelController: NSObject, NSWindowDelegate {
             return
         }
         teamPopup.isEnabled = true
+        // Multi-team canvas first
+        teamPopup.addItem(withTitle: "All teams")
+        teamPopup.lastItem?.representedObject = "__all__"
         let db = PairState.loadPairsDb()
         for p in pairs {
             let entry = db[p] as? [String: Any] ?? [:]
@@ -476,12 +484,19 @@ final class PanelController: NSObject, NSWindowDelegate {
             teamPopup.addItem(withTitle: name.isEmpty ? p : name)
             teamPopup.lastItem?.representedObject = p
         }
-        if let prev, let i = pairs.firstIndex(of: prev) {
-            teamPopup.selectItem(at: i)
+        if prev == "__all__" || prev == nil {
+            teamPopup.selectItem(at: 0)
+            selectedSession = pairs.count > 1 ? "__all__" : pairs[0]
+            if pairs.count == 1 {
+                teamPopup.selectItem(at: 1)
+                selectedSession = pairs[0]
+            }
+        } else if let i = pairs.firstIndex(of: prev!) {
+            teamPopup.selectItem(at: i + 1) // offset for All teams
             selectedSession = prev
         } else {
             teamPopup.selectItem(at: 0)
-            selectedSession = pairs[0]
+            selectedSession = pairs.count > 1 ? "__all__" : pairs[0]
         }
     }
 
@@ -498,71 +513,91 @@ final class PanelController: NSObject, NSWindowDelegate {
         canvasEmpty.isHidden = !pairs.isEmpty
         canvasScroll.isHidden = pairs.isEmpty
         canvasToolbar.isHidden = pairs.isEmpty
-        guard let session = selectedSession, !pairs.isEmpty else {
-            return
-        }
+        guard !pairs.isEmpty else { return }
+
+        let multi = selectedSession == "__all__" || (selectedSession == nil && pairs.count > 1)
+        let showPairs: [String] = multi ? pairs : [selectedSession ?? pairs[0]].compactMap { $0 }
 
         let size = NSSize(
-            width: max(1200, canvasScroll.contentSize.width + 280),
-            height: max(900, canvasScroll.contentSize.height + 280)
+            width: max(1400, canvasScroll.contentSize.width + 400 + CGFloat(max(0, showPairs.count - 1)) * 520),
+            height: max(1000, canvasScroll.contentSize.height + 320)
         )
         if !light { canvas.setFrameSize(size) }
 
-        let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
-        let saved = CanvasLayout.positions(for: session)
+        let snap = snapshot()
         var models: [AgentNodeModel] = []
+        let posMap = CanvasLayout.positions(for: multi ? nil : showPairs.first)
 
-        let cond = entry["conductor"] as? [String: Any]
-        let condId = (cond?["id"] as? String) ?? "c1"
-        let condLabel = (cond?["label"] as? String) ?? "Conductor"
-        let condType = (cond?["type"] as? String) ?? "grok"
-        let stowed = (entry["stowed"] as? Bool) == true
-        let brief = (entry["team_brief"] as? String) ?? ""
-        let rootPath = (entry["project_root"] as? String) ?? ""
-        let detail: String = {
-            if !brief.isEmpty { return String(brief.prefix(100)) }
-            if !rootPath.isEmpty { return rootPath }
-            return "Orchestrates work · verifies claims"
-        }()
-        let cAccent = TerminalTheme.Colors.from(entry["colors"])?.asNSColors.hi ?? PongTheme.accent
-        models.append(AgentNodeModel(
-            id: condId, role: "conductor", title: condLabel,
-            subtitle: "\(condType) · conductor",
-            detail: detail,
-            status: stowed ? "hidden" : "live",
-            accent: cAccent,
-            origin: saved[condId] ?? CanvasLayout.defaultPosition(role: "conductor", index: 0, canvas: size)
-        ))
-
-        for (i, w) in Workers.list(from: entry).enumerated() {
-            let wid = (w["id"] as? String) ?? "w\(i + 1)"
-            let lab = (w["label"] as? String) ?? wid
-            let typ = (w["type"] as? String) ?? "worker"
-            var status = "idle"
-            var wdetail = "Builds what the conductor assigns"
-            if let snap = snapshot(),
-               let teams = snap["teams"] as? [[String: Any]],
-               let team = teams.first(where: { ($0["session"] as? String) == session }),
-               let workers = team["workers"] as? [[String: Any]],
-               let match = workers.first(where: { ($0["id"] as? String) == wid }) {
-                status = (match["status_hint"] as? String) ?? status
-                let oj = match["open_jobs"] as? Int ?? 0
-                if oj > 0 {
-                    status = "busy"
-                    wdetail = "\(oj) open job\(oj == 1 ? "" : "s")"
-                }
-            }
-            let accent = TerminalTheme.Colors.from(w["colors"])?.asNSColors.hi ?? PongTheme.accent
+        for (ti, session) in showPairs.enumerated() {
+            let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
+            let display = (entry["display_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? session
+            let cond = entry["conductor"] as? [String: Any]
+            let condId = (cond?["id"] as? String) ?? "c1"
+            let condLabel = (cond?["label"] as? String) ?? "Orchestrator"
+            let condType = (cond?["type"] as? String) ?? "grok"
+            let stowed = (entry["stowed"] as? Bool) == true
+            let brief = (entry["team_brief"] as? String) ?? ""
+            let rootPath = (entry["project_root"] as? String) ?? ""
+            let detail: String = {
+                if !brief.isEmpty { return String(brief.prefix(90)) }
+                if !rootPath.isEmpty { return rootPath }
+                return "Orchestrates · verifies claims"
+            }()
+            let cKey = CanvasLayout.key(session: session, nodeId: condId, multi: multi)
+            let cOrigin = posMap[cKey] ?? posMap[condId]
+                ?? CanvasLayout.defaultPosition(teamIndex: ti, role: "conductor", workerIndex: 0, canvas: size, multi: multi)
+            let cAccent = TerminalTheme.Colors.from(entry["colors"])?.asNSColors.hi ?? PongTheme.blue
             models.append(AgentNodeModel(
-                id: wid, role: "worker", title: lab, subtitle: typ, detail: wdetail,
-                status: status, accent: accent,
-                origin: saved[wid] ?? CanvasLayout.defaultPosition(role: "worker", index: i, canvas: size)
+                session: session, id: condId, role: "conductor",
+                title: condLabel, subtitle: "\(condType) · orchestrator",
+                detail: detail, status: stowed ? "hidden" : "live",
+                teamLabel: multi ? display : "",
+                accent: cAccent, origin: cOrigin
+            ))
+
+            let ws = Workers.list(from: entry)
+            for (i, w) in ws.enumerated() {
+                let wid = (w["id"] as? String) ?? "w\(i + 1)"
+                let lab = (w["label"] as? String) ?? wid
+                let typ = (w["type"] as? String) ?? "worker"
+                var status = "idle"
+                var wdetail = "Implements assigned work"
+                if let teams = snap?["teams"] as? [[String: Any]],
+                   let team = teams.first(where: { ($0["session"] as? String) == session }),
+                   let workers = team["workers"] as? [[String: Any]],
+                   let match = workers.first(where: { ($0["id"] as? String) == wid }) {
+                    status = (match["status_hint"] as? String) ?? status
+                    let oj = match["open_jobs"] as? Int ?? 0
+                    if oj > 0 { status = "busy"; wdetail = "\(oj) open job\(oj == 1 ? "" : "s")" }
+                }
+                let wKey = CanvasLayout.key(session: session, nodeId: wid, multi: multi)
+                let origin = posMap[wKey] ?? posMap[wid]
+                    ?? CanvasLayout.defaultPosition(teamIndex: ti, role: "worker", workerIndex: i, canvas: size, multi: multi)
+                let accent = TerminalTheme.Colors.from(w["colors"])?.asNSColors.hi ?? PongTheme.magenta
+                models.append(AgentNodeModel(
+                    session: session, id: wid, role: "worker",
+                    title: lab, subtitle: typ, detail: wdetail, status: status,
+                    teamLabel: multi ? display : "",
+                    accent: accent, origin: origin
+                ))
+            }
+
+            // + add worker handle near orchestrator
+            let addId = "add"
+            let addKey = CanvasLayout.key(session: session, nodeId: addId, multi: multi)
+            let addOrigin = posMap[addKey]
+                ?? CGPoint(x: cOrigin.x + 200, y: cOrigin.y + 40)
+            models.append(AgentNodeModel(
+                session: session, id: addId, role: "add",
+                title: "+", subtitle: "worker", detail: "Add worker",
+                status: "idle", teamLabel: "", accent: PongTheme.magenta, origin: addOrigin
             ))
         }
-        canvas.reload(session: session, models: models)
+
+        canvas.reload(models: models, multiTeam: multi)
     }
 
-    // MARK: Mission dashboard
+    // MARK: - Mission dashboard
 
     private func snapshot() -> [String: Any]? {
         let out = Pong.sh("export PATH=\"$HOME/bin:/opt/homebrew/bin:$PATH\"; pong snapshot --compact 2>/dev/null | head -c 500000")
@@ -890,47 +925,90 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     @objc private func fitPressed() {
-        guard let session = selectedSession else { return }
-        let size = canvas.bounds.size.width > 0 ? canvas.bounds.size : NSSize(width: 1200, height: 900)
+        let multi = selectedSession == "__all__"
+        let pairs = PairState.listPairs()
+        let show = multi ? pairs : [selectedSession].compactMap { $0 }.filter { $0 != "__all__" }
+        guard !show.isEmpty else { return }
+        let size = canvas.bounds.size.width > 0 ? canvas.bounds.size : NSSize(width: 1400, height: 1000)
         var pos: [String: CGPoint] = [:]
-        let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
-        let condId = ((entry["conductor"] as? [String: Any])?["id"] as? String) ?? "c1"
-        pos[condId] = CanvasLayout.defaultPosition(role: "conductor", index: 0, canvas: size)
-        for (i, w) in Workers.list(from: entry).enumerated() {
-            let wid = (w["id"] as? String) ?? "w\(i + 1)"
-            pos[wid] = CanvasLayout.defaultPosition(role: "worker", index: i, canvas: size)
+        for (ti, session) in show.enumerated() {
+            let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
+            let condId = ((entry["conductor"] as? [String: Any])?["id"] as? String) ?? "c1"
+            let ck = CanvasLayout.key(session: session, nodeId: condId, multi: multi)
+            let cOrigin = CanvasLayout.defaultPosition(teamIndex: ti, role: "conductor", workerIndex: 0, canvas: size, multi: multi)
+            pos[ck] = cOrigin
+            if !multi { pos[condId] = cOrigin }
+            for (i, w) in Workers.list(from: entry).enumerated() {
+                let wid = (w["id"] as? String) ?? "w\(i + 1)"
+                let wk = CanvasLayout.key(session: session, nodeId: wid, multi: multi)
+                let o = CanvasLayout.defaultPosition(teamIndex: ti, role: "worker", workerIndex: i, canvas: size, multi: multi)
+                pos[wk] = o
+                if !multi { pos[wid] = o }
+            }
+            let ak = CanvasLayout.key(session: session, nodeId: "add", multi: multi)
+            pos[ak] = CGPoint(x: cOrigin.x + 200, y: cOrigin.y + 40)
         }
-        CanvasLayout.save(session: session, positions: pos)
+        CanvasLayout.save(session: multi ? nil : show.first, positions: pos, multi: multi)
         refreshCanvas()
     }
 
-    private func frontNode(session: String, id: String) {
-        if id.hasPrefix("w") {
-            Workers.frontWorker(pair: session, workerId: id)
+    private func frontModel(_ m: AgentNodeModel) {
+        if m.role == "worker" || m.id.hasPrefix("w") {
+            Workers.frontWorker(pair: m.session, workerId: m.id)
         } else {
-            DispatchQueue.global(qos: .userInitiated).async { Pairing.bringToFront(session) }
+            DispatchQueue.global(qos: .userInitiated).async { Pairing.bringToFront(m.session) }
         }
     }
 
-    private func killNode(session: String, id: String) {
-        if id.hasPrefix("w") {
+    private func killModel(_ m: AgentNodeModel) {
+        if m.role == "worker" || m.id.hasPrefix("w") {
             let a = NSAlert()
-            a.messageText = "Remove worker \(id)?"
+            a.messageText = "Remove worker \(m.id)?"
             a.addButton(withTitle: "Remove")
             a.addButton(withTitle: "Cancel")
             guard a.runModal() == .alertFirstButtonReturn else { return }
-            _ = Workers.removeWorker(pair: session, workerId: id)
+            _ = Workers.removeWorker(pair: m.session, workerId: m.id)
             reload()
         } else {
             let a = NSAlert()
             a.messageText = "Kill team?"
-            a.informativeText = session
+            a.informativeText = m.session
             a.addButton(withTitle: "Kill")
             a.addButton(withTitle: "Cancel")
             guard a.runModal() == .alertFirstButtonReturn else { return }
-            Pairing.killPair(session)
+            Pairing.killPair(m.session)
             selectedSession = nil
             reload()
         }
     }
+
+    private func addWorker(to session: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "Add worker"
+        a.informativeText = "Launch a new worker CLI into this team."
+        for t in WorkerType.all where t.id != "custom" {
+            a.addButton(withTitle: t.label)
+        }
+        a.addButton(withTitle: "Custom…")
+        a.addButton(withTitle: "Cancel")
+        let r = a.runModal()
+        let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        let idx = r.rawValue - first
+        let types = WorkerType.all.filter { $0.id != "custom" }
+        let picked: WorkerType?
+        if idx >= 0 && idx < types.count {
+            picked = WorkerType.resolved(types[idx].id)
+        } else if idx == types.count {
+            picked = AppDelegate.pickCustomWorker()
+        } else {
+            picked = nil
+        }
+        guard let wt = picked else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = Workers.addWorker(pair: session, type: wt)
+            DispatchQueue.main.async { self.reload() }
+        }
+    }
 }
+
