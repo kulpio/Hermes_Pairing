@@ -97,31 +97,37 @@ final class AgentNodeView: NSView {
     private let statusPill = NSView()
     private let statusLabel = NSTextField(labelWithString: "")
     private var buttons: [NSButton] = []
+    private let actionBar = NSView()
 
-    static let size = NSSize(width: 256, height: 148)
+    static let size = NSSize(width: 268, height: 160)
     /// Compact dock chip on card edge (not a free-floating blob)
     static let addSize = NSSize(width: 28, height: 28)
 
     override var mouseDownCanMoveWindow: Bool { false }
+    override var isOpaque: Bool { false }
+
+    private var isAddChip: Bool {
+        model.role == "add" || model.role == "add-sub"
+    }
 
     init(model: AgentNodeModel) {
         self.model = model
-        let sz = model.role == "add" ? Self.addSize : Self.size
+        let sz = (model.role == "add" || model.role == "add-sub") ? Self.addSize : Self.size
         super.init(frame: NSRect(origin: model.origin, size: sz))
         wantsLayer = true
-        layer?.cornerRadius = model.role == "add" ? 28 : 16
+        layer?.cornerRadius = isAddChip ? 14 : 16
         layer?.borderWidth = 1
         layer?.masksToBounds = false
 
-        if model.role == "add" {
+        if isAddChip {
             buildAddStyle()
         } else {
             buildCardStyle()
         }
         apply(model)
-        toolTip = model.role == "add"
+        toolTip = isAddChip
             ? "Add worker to this orchestrator"
-            : "Drag to move · click Open for terminal · Focus for team activity"
+            : "Drag header to move · Open / Focus / Perms / Kill on the action bar"
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -186,29 +192,43 @@ final class AgentNodeView: NSView {
         labelStyle(subField)
         addSubview(subField)
 
+        // Detail sits above the fixed action bar
         detailField.font = PongTheme.font(10)
         detailField.textColor = PongTheme.textTertiary
-        detailField.frame = NSRect(x: 14, y: 44, width: Self.size.width - 28, height: 28)
+        detailField.frame = NSRect(x: 14, y: 48, width: Self.size.width - 28, height: 26)
         detailField.maximumNumberOfLines = 2
         labelStyle(detailField)
         addSubview(detailField)
 
-        // Actions row
-        var x: CGFloat = 12
-        func addBtn(_ t: String, _ sel: Selector, filled: Bool, w: CGFloat = 56) {
-            let b = makeBtn(t, sel, filled: filled, frame: NSRect(x: x, y: 10, width: w, height: 26))
-            addSubview(b)
+        // —— Action bar (always visible, full width) ——
+        actionBar.frame = NSRect(x: 8, y: 8, width: Self.size.width - 16, height: 34)
+        actionBar.wantsLayer = true
+        actionBar.layer?.backgroundColor = PongTheme.bgInput.cgColor
+        actionBar.layer?.cornerRadius = 10
+        actionBar.layer?.borderWidth = 1
+        actionBar.layer?.borderColor = PongTheme.border.cgColor
+        addSubview(actionBar)
+
+        var x: CGFloat = 6
+        func addBtn(_ t: String, _ sel: Selector, style: BtnStyle, w: CGFloat) {
+            let b = makeBtn(t, sel, style: style, frame: NSRect(x: x, y: 5, width: w, height: 24))
+            actionBar.addSubview(b)
             buttons.append(b)
-            x += w + 6
+            x += w + 5
         }
-        addBtn("Open", #selector(frontTap), filled: true, w: 52)
+        // Primary actions both roles
+        addBtn("Open", #selector(frontTap), style: .primary, w: 50)
         if model.role == "conductor" {
-            addBtn("Focus", #selector(focusTap), filled: false, w: 52)
-            addBtn("Opts", #selector(optsTap), filled: false, w: 44)
+            addBtn("Focus", #selector(focusTap), style: .secondary, w: 48)
+            addBtn("Opts", #selector(optsTap), style: .secondary, w: 44)
+            addBtn("Kill", #selector(killTap), style: .danger, w: 42)
         } else {
-            addBtn("Perms", #selector(permsTap), filled: false, w: 52)
+            addBtn("Perms", #selector(permsTap), style: .secondary, w: 48)
+            addBtn("Kill", #selector(killTap), style: .danger, w: 42)
         }
     }
+
+    private enum BtnStyle { case primary, secondary, danger }
 
     private func labelStyle(_ f: NSTextField) {
         f.isEditable = false
@@ -217,33 +237,45 @@ final class AgentNodeView: NSView {
         f.backgroundColor = .clear
     }
 
-    private func makeBtn(_ title: String, _ sel: Selector, filled: Bool, frame: NSRect) -> NSButton {
+    private func makeBtn(_ title: String, _ sel: Selector, style: BtnStyle, frame: NSRect) -> NSButton {
         let b = NSButton(frame: frame)
-        b.bezelStyle = .inline
+        b.bezelStyle = .shadowlessSquare
         b.isBordered = false
+        b.setButtonType(.momentaryChange)
         b.wantsLayer = true
-        b.layer?.cornerRadius = 8
-        if filled {
+        b.layer?.cornerRadius = 7
+        b.layer?.masksToBounds = true
+        let font = PongTheme.font(10, weight: .semibold)
+        switch style {
+        case .primary:
             b.layer?.backgroundColor = PongTheme.blue.cgColor
             b.attributedTitle = NSAttributedString(string: title, attributes: [
-                .foregroundColor: NSColor.white, .font: PongTheme.font(10, weight: .semibold),
+                .foregroundColor: NSColor.white, .font: font,
             ])
-        } else {
+        case .secondary:
             b.layer?.backgroundColor = PongTheme.bgHover.cgColor
             b.layer?.borderWidth = 1
-            b.layer?.borderColor = PongTheme.border.cgColor
+            b.layer?.borderColor = PongTheme.borderStrong.cgColor
             b.attributedTitle = NSAttributedString(string: title, attributes: [
-                .foregroundColor: PongTheme.textSecondary, .font: PongTheme.font(10, weight: .medium),
+                .foregroundColor: PongTheme.textPrimary, .font: font,
+            ])
+        case .danger:
+            b.layer?.backgroundColor = PongTheme.danger.withAlphaComponent(0.2).cgColor
+            b.layer?.borderWidth = 1
+            b.layer?.borderColor = PongTheme.danger.withAlphaComponent(0.45).cgColor
+            b.attributedTitle = NSAttributedString(string: title, attributes: [
+                .foregroundColor: PongTheme.danger, .font: font,
             ])
         }
         b.target = self
         b.action = sel
+        b.toolTip = title
         return b
     }
 
     func apply(_ m: AgentNodeModel) {
         if !dragging, frame.origin != m.origin { setFrameOrigin(m.origin) }
-        if m.role == "add" { return }
+        if m.role == "add" || m.role == "add-sub" { return }
 
         titleField.stringValue = m.title
         subField.stringValue = m.subtitle
@@ -280,9 +312,14 @@ final class AgentNodeView: NSView {
     @objc private func focusTap() { onFocus?(model) }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        // point is in superview coordinates
         guard !isHidden, frame.contains(point) else { return nil }
         let local = convert(point, from: superview)
-        for b in buttons where b.frame.contains(local) { return b }
+        // Prefer action-bar buttons (coords relative to actionBar)
+        let inBar = actionBar.convert(local, from: self)
+        for b in buttons {
+            if b.frame.contains(inBar) { return b }
+        }
         return self
     }
 
@@ -295,13 +332,16 @@ final class AgentNodeView: NSView {
             onFront?(model)
             return
         }
+        // Don't start drag if press is on the action bar
         let local = convert(event.locationInWindow, from: nil)
-        if buttons.contains(where: { $0.frame.contains(local) }) { return }
+        if actionBar.frame.contains(local) { return }
         dragStart = event.locationInWindow
         originStart = frame.origin
         dragging = true
         onDragBegan?()
         superview?.addSubview(self)
+        // Keep action bar above siblings after re-add
+        addSubview(actionBar)
     }
 
     override func mouseDragged(with event: NSEvent) {
