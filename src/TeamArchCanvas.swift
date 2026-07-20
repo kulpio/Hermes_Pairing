@@ -625,19 +625,23 @@ final class TeamArchCanvas: NSView {
             needsDisplay = true
             return
         }
-        edges.removeAll { $0.from == from && $0.to == n.id }
         let short = Self.kindChoices.first(where: { $0.id == kind })?.short ?? kind.uppercased()
-        edges.append(Edge(
+        var edge = Edge(
             id: "\(from)>\(n.id):\(kind)", from: from, to: n.id,
             kind: kind, label: short
-        ))
-        if kind == "sub", let i = nodes.firstIndex(where: { $0.id == n.id }) {
-            nodes[i].parentId = from
+        )
+        // Claim/review point up; delegate/sub point down — flip endpoints if needed
+        edge = orientCanvasEdge(edge)
+        edges.removeAll { $0.from == edge.from && $0.to == edge.to && $0.kind == edge.kind }
+        edges.removeAll { $0.from == from && $0.to == n.id } // drop undirected pair we just replaced
+        edges.append(edge)
+        if edge.kind == "sub", let i = nodes.firstIndex(where: { $0.id == edge.to }) {
+            nodes[i].parentId = edge.from
             nodes[i].role = "subagent"
             nodes[i].origin.y = bandH * 2 + 40
         }
-        if kind == "peer", !edges.contains(where: { $0.from == "c1" && $0.to == n.id }) {
-            edges.append(Edge(id: "c1>\(n.id):delegate", from: "c1", to: n.id, kind: "delegate", label: "DELEGATE"))
+        if edge.kind == "peer", !edges.contains(where: { $0.from == "c1" && $0.to == edge.to }) {
+            edges.append(Edge(id: "c1>\(edge.to):delegate", from: "c1", to: edge.to, kind: "delegate", label: "DELEGATE"))
         }
         linkFrom = nil
         linkMode = false
@@ -756,15 +760,45 @@ final class TeamArchCanvas: NSView {
         return Self.kindChoices[idx].id
     }
 
+    /// Apply semantic orientation (claim↑, delegate↓) using seat roles.
+    private func orientCanvasEdge(_ e: Edge) -> Edge {
+        let roleOf: (String) -> String = { id in
+            self.nodes.first(where: { $0.id == id })?.role ?? "worker"
+        }
+        let ends = FlowGraph.orientEndpoints(from: e.from, to: e.to, kind: e.kind, roleOf: roleOf)
+        var out = e
+        out.from = ends.from
+        out.to = ends.to
+        out.id = "\(out.from)>\(out.to):\(out.kind)"
+        return out
+    }
+
+    private func flipCanvasEdge(at i: Int) {
+        guard edges.indices.contains(i) else { return }
+        var e = edges[i]
+        let tmp = e.from
+        e.from = e.to
+        e.to = tmp
+        e.id = "\(e.from)>\(e.to):\(e.kind)"
+        edges[i] = e
+        selectedEdgeId = e.id
+        onChanged?()
+        needsDisplay = true
+    }
+
     private func editEdgeKind(id: String) {
         guard let i = edges.firstIndex(where: { $0.id == id }) else { return }
         let cur = edges[i]
         let a = NSAlert()
         a.messageText = "Connection: \(cur.from) → \(cur.to)"
-        a.informativeText = "What should happen on this link? Drag the dotted ends to reassign seats."
+        a.informativeText =
+            "What should happen on this link?\n" +
+            "Claim / Review auto-point upward (agent → orch). Delegate / Sub point downward.\n" +
+            "Flip reverses the arrow. Drag dotted ends to reassign seats."
         for k in Self.kindChoices {
             a.addButton(withTitle: k.title)
         }
+        a.addButton(withTitle: "Flip direction")
         a.addButton(withTitle: "Delete link")
         a.addButton(withTitle: "Cancel")
         let r = a.runModal()
@@ -774,13 +808,18 @@ final class TeamArchCanvas: NSView {
             let k = Self.kindChoices[idx]
             edges[i].kind = k.id
             edges[i].label = k.short
-            edges[i].id = "\(edges[i].from)>\(edges[i].to):\(k.id)"
-            if k.id == "sub", let ti = nodes.firstIndex(where: { $0.id == edges[i].to }) {
+            edges[i] = orientCanvasEdge(edges[i])
+            selectedEdgeId = edges[i].id
+            if edges[i].kind == "sub", let ti = nodes.firstIndex(where: { $0.id == edges[i].to }) {
                 nodes[ti].parentId = edges[i].from
                 nodes[ti].role = "subagent"
             }
             onChanged?()
         } else if idx == Self.kindChoices.count {
+            // Flip direction
+            flipCanvasEdge(at: i)
+            return
+        } else if idx == Self.kindChoices.count + 1 {
             edges.remove(at: i)
             selectedEdgeId = nil
             onChanged?()

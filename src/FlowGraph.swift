@@ -146,6 +146,52 @@ enum FlowGraph {
         return e
     }
 
+    /// Band rank for orientation: orch (0) above agents (1) above subs (2).
+    static func bandRank(role: String) -> Int {
+        switch role.lowercased() {
+        case "conductor", "orchestrator": return 0
+        case "subagent": return 2
+        default: return 1
+        }
+    }
+
+    /// Reorder endpoints so the arrow matches the kind’s natural direction:
+    /// - **claim / review** → upward (agent/sub → orch / parent)
+    /// - **delegate / sub** → downward (orch / parent → agent/sub)
+    /// - **peer** → leave as drawn
+    static func orientEndpoints(
+        from: String, to: String, kind: String,
+        roleOf: (String) -> String
+    ) -> (from: String, to: String) {
+        let fr = roleOf(from), tr = roleOf(to)
+        let fa = bandRank(role: fr), ta = bandRank(role: tr)
+        switch kind.lowercased() {
+        case "claim", "review":
+            // Prefer lower band → higher band (up the canvas toward ORCH)
+            if fa < ta { return (to, from) }
+            if fr == "conductor" && tr != "conductor" { return (to, from) }
+            return (from, to)
+        case "delegate", "sub":
+            // Prefer higher band → lower (down the canvas)
+            if fa > ta { return (to, from) }
+            if fr != "conductor" && tr == "conductor" { return (to, from) }
+            return (from, to)
+        default:
+            return (from, to)
+        }
+    }
+
+    /// Apply `orientEndpoints` and rebuild id/label.
+    static func orient(_ edge: Edge, roleOf: (String) -> String) -> Edge {
+        let ends = orientEndpoints(from: edge.from, to: edge.to, kind: edge.kind, roleOf: roleOf)
+        var e = edge
+        e.from = ends.from
+        e.to = ends.to
+        e.id = makeId(from: e.from, to: e.to, kind: e.kind)
+        e.dir = "forward"
+        return e
+    }
+
     /// Add a directed link. Does **not** remove the reverse edge — loops are first-class.
     /// Only replaces an existing edge with the same from + to + kind.
     /// **Team isolation:** both seats must exist on this pair; refuse foreign ids.
@@ -668,6 +714,8 @@ final class FlowLinkEditSheet: NSObject {
             kindPop.addItem(withTitle: k.title)
             kindPop.lastItem?.representedObject = k.id
         }
+        kindPop.target = self
+        kindPop.action = #selector(kindChanged)
         root.addSubview(kindPop)
         y -= 36
 
@@ -746,15 +794,57 @@ final class FlowLinkEditSheet: NSObject {
         let b = (toPop.selectedItem?.representedObject as? String) ?? edge.to
         let an = seats.first(where: { $0.id == a })?.title ?? a
         let bn = seats.first(where: { $0.id == b })?.title ?? b
-        dirLabel.stringValue = "\(an)  →  \(bn)"
+        let k = (kindPop.selectedItem?.representedObject as? String) ?? edge.kind
+        let hint: String = {
+            switch k {
+            case "claim", "review": return "  ·  upward report"
+            case "delegate", "sub": return "  ·  downward assign"
+            default: return ""
+            }
+        }()
+        dirLabel.stringValue = "\(an)  →  \(bn)\(hint)"
     }
+
+    private func selectSeatPop(_ pop: NSPopUpButton, id: String) {
+        for item in pop.itemArray {
+            if (item.representedObject as? String) == id {
+                pop.select(item)
+                return
+            }
+        }
+    }
+
+    /// When kind changes, auto-orient from→to (claim points up toward orch).
+    @objc private func kindChanged() {
+        guard let k = kindPop.selectedItem?.representedObject as? String else { return }
+        let a = (fromPop.selectedItem?.representedObject as? String) ?? edge.from
+        let b = (toPop.selectedItem?.representedObject as? String) ?? edge.to
+        let roleOf: (String) -> String = { id in
+            self.seats.first(where: { $0.id == id })?.role ?? "worker"
+        }
+        let ends = FlowGraph.orientEndpoints(from: a, to: b, kind: k, roleOf: roleOf)
+        selectSeatPop(fromPop, id: ends.from)
+        selectSeatPop(toPop, id: ends.to)
+        // Suggest default label for the new kind if still a stock phrase
+        let stock = kinds.map { FlowGraph.Edge.defaultLabel(kind: $0.id) }
+            + Self.stockLabels
+        if stock.contains(labelField.stringValue) || labelField.stringValue.isEmpty {
+            labelField.stringValue = FlowGraph.Edge.defaultLabel(kind: k)
+        }
+        refreshDir()
+    }
+
+    private static let stockLabels = [
+        "DELEGATE", "CLAIM", "REVIEW", "PEER", "SUB · LINK",
+        "DELEGATE · AUTH", "CLAIM · DONE", "PEER · HANDOFF",
+    ]
 
     @objc private func flipPressed() {
         let a = fromPop.indexOfSelectedItem
         let b = toPop.indexOfSelectedItem
         fromPop.selectItem(at: b)
         toPop.selectItem(at: a)
-        // Flip kind smartly for loops
+        // Flip kind smartly for loops (delegate ↔ claim) only when both ends are orch↔agent
         if let k = kindPop.selectedItem?.representedObject as? String {
             let alt: String? = {
                 switch k {
@@ -765,6 +855,7 @@ final class FlowLinkEditSheet: NSObject {
             }()
             if let alt, let idx = kinds.firstIndex(where: { $0.id == alt }) {
                 kindPop.selectItem(at: idx)
+                labelField.stringValue = FlowGraph.Edge.defaultLabel(kind: alt)
             }
         }
         refreshDir()
