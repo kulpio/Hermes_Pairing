@@ -42,16 +42,23 @@ def _worker_status_hint(session: str, worker_id: str) -> tuple[str, int]:
 
 
 def team_snapshot(session: str, entry: dict[str, Any] | None = None) -> dict[str, Any]:
+    from .subagents import collect_ephemeral_subs
+
     state = load_session_state(session)
     if not state and entry:
         state = normalize_pair_state({**entry, "session": session})
     if not state:
         state = {"session": session, "workers": [], "conductor": {}}
     c = conductor_from_state(state)
+    cond_id = str(c.get("id") or "c1")
+    permanent_ids: set[str] = {cond_id}
     workers_out = []
     for w in workers_from_state(state):
         wid = str(w.get("id"))
+        permanent_ids.add(wid)
         hint, nopen = _worker_status_hint(session, wid)
+        # Permanent roster workers tagged ephemeral only appear while busy
+        is_eph_worker = bool(w.get("ephemeral"))
         workers_out.append(
             {
                 "id": wid,
@@ -64,9 +71,21 @@ def team_snapshot(session: str, entry: dict[str, Any] | None = None) -> dict[str
                 "done_marker": w.get("done_marker"),
                 "status_hint": hint,
                 "open_jobs": nopen,
+                "parent_id": w.get("parent_id") or w.get("parent"),
+                "ephemeral": is_eph_worker,
+                "mission_role": w.get("mission_role") or w.get("role") or "coder",
+                # Hidden from map when ephemeral + idle (vanish when done)
+                "map_visible": (not is_eph_worker) or nopen > 0 or hint not in ("idle", ""),
             }
         )
     jobs = summarize_jobs(session)
+    open_list = open_jobs(session)
+    eph_subs = collect_ephemeral_subs(
+        session,
+        permanent_ids=permanent_ids,
+        open_job_list=open_list,
+        conductor_id=cond_id,
+    )
     sess_dir = sessions_dir(session)
     return {
         "session": session,
@@ -83,6 +102,7 @@ def team_snapshot(session: str, entry: dict[str, Any] | None = None) -> dict[str
             "tmux_index": c.get("tmux_index"),
         },
         "workers": workers_out,
+        "ephemeral_subs": eph_subs,
         "project_root": state.get("project_root") or "",
         "team_brief": state.get("team_brief") or "",
         "transport_default": state.get("transport_default") or "job+paste",

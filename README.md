@@ -1,84 +1,97 @@
-# Pong (Agent-Pong)
+# CyberPong
 
-**Local agent mission control.** Multi-CLI teams, conductor-agnostic orchestration, human-in-the-loop terminals, and a **job control plane**.
+**Local agent mission control for Mac.**
 
-> Private foundation rework of [Hermes-Pong](https://github.com/kulpio/Hermes-Pong).  
-> Public Hermes-Pong stays as-is; this repo is the v2 architecture.
+CyberPong lets you run a **team of AI coding tools** on your machine: one conductor plans and assigns work, workers build in real Terminal sessions, and you stay in the loop when something needs a human.
+
+The menu-bar app shows as **CyberPong**. The binary and paths still say `Pong` for compatibility (`/Applications/Pong.app`, `pong` CLI, `~/.pong/`).
 
 | | |
 |--|--|
-| **Recommended conductor** | **Grok Build** |
-| **Also supported** | Hermes Agent, Claude Code, custom CLI |
-| **Workers** | Claude, Grok, Codex, Kimi, OpenCode, custom |
-| **Handoff truth** | `~/.pong/jobs/<session>/<job_id>.json` |
-| **TUI paste** | Optional (`job+paste`) — not required for progress |
+| **UI name** | CyberPong |
+| **Repo** | [kulpio/Agent-Pong](https://github.com/kulpio/Agent-Pong) |
+| **Conductors** | Grok Build, Claude Code, Hermes Agent, custom CLI |
+| **Workers** | Claude, Grok, Codex, Kimi, OpenCode, Hermes, custom |
+| **State** | `~/.pong/` (jobs, events, ledger, teams) |
+| **Platform** | macOS 13+ |
 
-## Why this exists
+---
 
-Single-agent TUIs (Claude Code, Grok Build, Hermes) each own one session.  
-**Pong** owns the **team**: layout, isolation, jobs, claims, verdicts, and the ability for a human to jump into any window.
+## What it can do
 
-## Architecture (short)
+In plain language:
 
-```text
-YOU ──type mission──►  CONDUCTOR (Grok / Hermes / …)
-                            │
-                            │  pong job create  (file always)
-                            │  + optional paste / headless
-                            ▼
-                       WORKERS (real TUIs — intervene anytime)
-                            │
-                            ▼
-                       claim + acceptance + ledger
-```
+1. **Build multi-agent teams** — Pick a conductor and staff workers from the CLIs you already use. Each seat is a real Terminal / tmux session you can open anytime.
+2. **See the mission live** — A 3D map shows orchestrator, agents, sub-agents, and you. Links and status update as work moves. Floor-line dots only travel when data is actually flowing.
+3. **Talk without hunting windows** — Human console: send a prompt to the selected orchestrator, and answer “needs you” asks when a job waits on input.
+4. **Keep handoffs honest** — Jobs are files under `~/.pong/jobs/…`. Create, list, and inspect work from the CLI or the app. Progress isn’t only “whatever got pasted into chat.”
+5. **Design the topology** — Architecture editor for peer vs sub-agent links, snap-to-orchestrator, save the graph with the team.
+6. **Schedule work** — Cron jobs on a 3D timeline (future into the distance) plus a left HUD list.
+7. **Save and reopen lineups** — Save Team / Show Teams for names, seats, models, and graph.
+8. **Stay local** — Teams, jobs, ledger, and events stay on your Mac. CyberPong does **not** store vendor API keys.
 
-Full design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+---
 
-## Install
+## Quick start
 
 ```bash
-git clone git@github.com:kulpio/Agent-Pong.git   # private
+git clone https://github.com/kulpio/Agent-Pong.git
 cd Agent-Pong
 bash scripts/setup.sh --with-skills
 ```
 
-CLIs land in `~/bin` (`pong`, `pong-gate.py`, `pong-delegate.py`, …).  
-App (if built): `/Applications/Pong.app`
+CLIs install to `~/bin` (`pong`, `pong-gate.py`, `pong-delegate.py`, …).
 
-Migrate old Hermes Pong state:
+### Build the Mac app
+
+```bash
+bash scripts/build-app.sh --dev
+bash scripts/install.sh
+```
+
+That installs `/Applications/Pong.app` and launches **CyberPong**.
+
+Migrate older Hermes Pong state if needed:
 
 ```bash
 pong migrate
 ```
 
-## Quick CLI
+---
+
+## In the app
+
+1. **New team** — choose conductor + workers.
+2. Send a mission from the **human console** or the conductor terminal.
+3. Watch seats on the **mission map**; open Architecture when you want to edit links.
+4. Intervene in any worker Terminal when you need to; use Focus / Stow / Kill as needed.
+5. **Save Team** so you can reopen the lineup later.
+
+---
+
+## CLI (control plane)
 
 ```bash
 pong status
 pong gate                          # BRIDGE_ON / OFF
-pong check                         # foundation self-check (UI readiness)
-pong snapshot                      # JSON for the panel (contract v1)
+pong check                         # foundation self-check
+pong snapshot                      # JSON the panel reads
 pong job create --worker w1 --task 'Implement login. Tests must pass.'
-pong job create --worker w1 --task '…' --no-paste    # robust: file only
+pong job create --worker w1 --task '…' --no-paste
 pong job list
 pong job show job_…
 pong events -n 20
 pong ledger record --task-id T1 --round 1 --verdict accept --evidence 'npm test ok'
 ```
 
-UI must build on **`pong snapshot`** — see [`docs/UI-CONTRACT.md`](docs/UI-CONTRACT.md).
+The UI is built on **`pong snapshot`**. Details: [`docs/UI-CONTRACT.md`](docs/UI-CONTRACT.md).
+
+Architecture notes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)  
+Agent vocabulary / north star: [`docs/NORTH-STAR-AGENT-HANDOUT.md`](docs/NORTH-STAR-AGENT-HANDOUT.md)
 
 Compat aliases: `pong-delegate.py`, `claude-delegate.py`, `pong-gate.py`.
 
-## New team (app)
-
-1. **New pair / New team**
-2. Pick **conductor** (Grok recommended; Hermes if you don’t want Grok)
-3. Staff **workers** (Claude, Team, …)
-4. Type missions in the **conductor** terminal
-5. Intervene in any **worker** terminal anytime
-
-Env on team panes: `PONG_SESSION` (+ legacy `HERMES_PONG_SESSION`).
+---
 
 ## Skills
 
@@ -94,16 +107,34 @@ bash scripts/install-skills.sh hermes
 | `grok-pong-bridge` | Grok as conductor |
 | `hermes-pong-bridge` | Hermes as conductor |
 
+---
+
 ## State
 
-Primary: `~/.pong/`  
-Legacy read: `~/.hermes-pong/`
+| Path | What |
+|------|------|
+| `~/.pong/` | Primary state (teams, jobs, events, ledger) |
+| `~/.hermes-pong/` | Legacy read path |
+
+Env on team panes: `PONG_SESSION` (legacy: `HERMES_PONG_SESSION`).
+
+---
+
+## Landing page
+
+Marketing site sources live in [`landing/`](landing/). Deploy that folder (e.g. Vercel) for the public page.
+
+Brand kit (mark, wordmarks, favicons): [`brand/`](brand/) and [`resources/brand/`](resources/brand/).
+
+---
 
 ## Version
 
-**2.0.0-alpha** — control plane + conductor picker + job transports.  
-Mission dashboard UI and further app polish continue on this foundation.
+**2.0.0-alpha** — control plane, multi-CLI teams, 3D mission map, architecture editor, cron timeline, human console.
+
+---
 
 ## License / privacy
 
-Local-only teams, jobs, and ledger. No vendor API keys stored by Pong.
+Local-only teams, jobs, and ledger. No vendor API keys stored by CyberPong.
+}

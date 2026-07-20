@@ -4,6 +4,8 @@
 
 **UI consumers:** read [`UI-CONTRACT.md`](UI-CONTRACT.md) — `pong snapshot` is the only envelope the panel should depend on.
 
+**Product north star & naming:** [`NORTH-STAR-AGENT-HANDOUT.md`](NORTH-STAR-AGENT-HANDOUT.md) — live runtime console (teams, seats, session policy, jobs). Do not conflate with standing grants / Umbra.
+
 ## Goals
 
 | Goal | How |

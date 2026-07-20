@@ -12,11 +12,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$ROOT/dist/HermesPong.app"
+# App name must match build-app.sh output (Pong.app — not legacy HermesPong.app)
+APP="$ROOT/dist/Pong.app"
 ENTITLEMENTS="$ROOT/resources/entitlements.plist"
 PROFILE="hermes-pong"
-ZIP_NOTARIZE="$ROOT/dist/HermesPong-notarize.zip"
-ZIP_RELEASE="$ROOT/dist/HermesPong-macOS.zip"
+ZIP_NOTARIZE="$ROOT/dist/Pong-notarize.zip"
+ZIP_RELEASE="$ROOT/dist/Pong-macOS.zip"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -108,12 +109,12 @@ echo "→ Packaging release zip (post-staple)"
 rm -f "$ZIP_RELEASE"
 ditto -c -k --keepParent "$APP" "$ZIP_RELEASE"
 
-# zip must contain only HermesPong.app
-if zipinfo -1 "$ZIP_RELEASE" | grep -v "^HermesPong.app/" | grep -q .; then
-  zipinfo -1 "$ZIP_RELEASE" | grep -v "^HermesPong.app/" >&2
-  fail "release zip contains entries outside HermesPong.app/"
+# zip must contain only Pong.app
+if zipinfo -1 "$ZIP_RELEASE" | grep -v "^Pong.app/" | grep -q .; then
+  zipinfo -1 "$ZIP_RELEASE" | grep -v "^Pong.app/" >&2
+  fail "release zip contains entries outside Pong.app/"
 fi
-echo "  ✓ zip contains only HermesPong.app"
+echo "  ✓ zip contains only Pong.app"
 
 echo "→ Gatekeeper assessment"
 spctl --assess --type execute -vv "$APP"

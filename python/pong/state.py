@@ -81,6 +81,11 @@ def _tmux_current_session() -> str | None:
 
 
 def detect_bound_session(explicit: str | None = None) -> str | None:
+    """Read-oriented session resolution (may fall back to active-pair).
+
+    Mutating ops must use ``routing.resolve_write_session`` instead — that path
+    never falls back to active-pair and enforces per-session tokens (Addendum 2).
+    """
     if explicit and explicit.strip():
         return explicit.strip()
     for key in ("PONG_SESSION", "HERMES_PONG_SESSION"):
@@ -204,8 +209,14 @@ def normalize_pair_state(state: dict[str, Any]) -> dict[str, Any]:
         s["worker_label"] = w0.get("label")
         s["worker_cmd"] = w0.get("cmd")
         s["claude_mode"] = w0.get("mode") or "tmux"
+    # File-first handoffs; paste remains optional notify
+    # job+paste: always write job file AND paste into Claude's tmux pane so the
+    # human-visible TUI shows the handoff (job-only left Claude "idle" on the bridge).
     s.setdefault("transport_default", "job+paste")
     s.setdefault("autonomy_level", "full")
+    # flow_graph: editable topology (UI); missing ⇒ consumers default conductor→workers
+    if "flow_graph" not in s:
+        s["flow_graph"] = {"edges": []}
     return s
 
 
@@ -299,7 +310,8 @@ def format_permissions_block(state: dict[str, Any]) -> str:
     note = (perms.get("custom_prompt") or "").strip()
     if not bans and not note:
         return ""
-    lines = ["## ACCESS CONSTRAINTS"]
+    # North-star: live-layer seat restrictions (not standing grants)
+    lines = ["## Session access policy"]
     if bans:
         lines.append("- " + "; ".join(bans))
     if note:
@@ -316,6 +328,12 @@ def session_artifact(state: dict[str, Any], name: str) -> Path:
 
 def write_bind_card(session: str) -> Path:
     ensure_layout(session)
+    try:
+        from .routing import ensure_session_token
+
+        ensure_session_token(session)
+    except Exception:
+        pass
     state = load_session_state(session)
     c = conductor_from_state(state)
     lines = [
@@ -335,10 +353,11 @@ def write_bind_card(session: str) -> Path:
     lines += [
         "",
         "## Rules",
-        "- You are bound to THIS session only.",
+        "- You are bound to THIS session only (enforced: PONG_SESSION + PONG_TOKEN).",
         "- Submit work with: `pong job create --worker <id> --task '…'`",
         "- Or: `pong delegate --worker <id> --no-wait '…'`",
-        "- Never target another pong-team* / hermes-pair* session.",
+        "- Cross-team paste/jobs are refused. Sole inter-team channel: "
+        "`pong brief send --to <other-session> '…'` (file inbox, never auto-pasted).",
         "- While bridge is on: orchestrate only — do not implement product code yourself.",
         "",
     ]

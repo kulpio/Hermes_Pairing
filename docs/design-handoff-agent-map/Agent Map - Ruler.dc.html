@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:#05080b;}
+  body{font-family:'IBM Plex Mono',monospace;-webkit-font-smoothing:antialiased;color:#dfe8ee;}
+  a{color:#35d6ff;text-decoration:none;} a:hover{color:#7ee6ff;}
+  ::selection{background:rgba(53,214,255,0.25);}
+  @keyframes amBlink{0%,100%{opacity:1;}50%{opacity:0.35;}}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</helmet>
+
+<div style="position:fixed;inset:0;overflow:hidden;background:radial-gradient(130% 100% at 62% 26%, #0b131b 0%, #06090d 55%, #04060900 100%);font-family:'IBM Plex Mono',monospace;">
+
+  <div id="am-stage" style="position:absolute;inset:0;"></div>
+  <div id="am-labels" style="position:absolute;inset:0;pointer-events:none;z-index:5;"></div>
+  <div style="position:absolute;inset:0;pointer-events:none;z-index:6;background:radial-gradient(105% 100% at 50% 42%, transparent 52%, rgba(3,5,8,0.62) 100%);"></div>
+
+  <!-- LEFT RAIL -->
+  <div style="position:absolute;top:0;left:0;bottom:0;width:64px;display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:70px;border-right:1px solid rgba(130,150,160,0.14);background:rgba(6,9,12,0.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:30;">
+    <div onClick="{{ navCommand }}" title="Command" style="width:40px;height:40px;display:grid;place-items:center;border-radius:4px;cursor:pointer;background:{{ railCmdBg }};border:1px solid {{ railCmdBd }};">
+      <svg width="16" height="16" viewBox="0 0 16 16"><g fill="#aeb9bf"><rect x="0" y="0" width="6.5" height="6.5"/><rect x="9.5" y="0" width="6.5" height="6.5"/><rect x="0" y="9.5" width="6.5" height="6.5"/><rect x="9.5" y="9.5" width="6.5" height="6.5"/></g></svg>
+    </div>
+    <div onClick="{{ navMission }}" title="Mission" style="width:40px;height:40px;display:grid;place-items:center;border-radius:4px;cursor:pointer;background:{{ railMisBg }};border:1px solid {{ railMisBd }};">
+      <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="#aeb9bf" stroke-width="1.3"><circle cx="8.5" cy="8.5" r="7"/><circle cx="8.5" cy="8.5" r="3.4"/><circle cx="8.5" cy="8.5" r="0.6" fill="#aeb9bf" stroke="none"/></svg>
+    </div>
+    <div onClick="{{ navSetup }}" title="Setup" style="width:40px;height:40px;display:grid;place-items:center;border-radius:4px;cursor:pointer;background:{{ railSetBg }};border:1px solid {{ railSetBd }};">
+      <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="#aeb9bf" stroke-width="1.3"><line x1="2" y1="4" x2="15" y2="4"/><circle cx="12" cy="4" r="1.6" fill="#06090d"/><line x1="2" y1="8.5" x2="15" y2="8.5"/><circle cx="6" cy="8.5" r="1.6" fill="#06090d"/><line x1="2" y1="13" x2="15" y2="13"/><circle cx="11" cy="13" r="1.6" fill="#06090d"/></svg>
+    </div>
+  </div>
+
+  <!-- TOP BAR -->
+  <div style="position:absolute;top:0;left:64px;right:0;height:60px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;z-index:12;">
+    <div style="display:flex;align-items:center;gap:20px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 1 L13 8 L19 10 L13 12 L10 19 L7 12 L1 10 L7 8 Z" fill="#35d6ff"/></svg>
+        <span style="font:700 18px/1 'Space Grotesk',sans-serif;letter-spacing:0.02em;color:#f2f6f8;">Pong</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;height:34px;padding:0 12px;background:rgba(12,17,22,0.8);border:1px solid rgba(130,150,160,0.18);border-radius:4px;font:500 13px/1 'IBM Plex Mono',monospace;color:#cdd8de;">
+        Umbra v0.1
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="#7a8890" stroke-width="1.4"><path d="M3 4 L5.5 1.5 L8 4"/><path d="M3 7 L5.5 9.5 L8 7"/></svg>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <div style="display:flex;align-items:center;gap:8px;height:34px;padding:0 14px;background:rgba(12,17,22,0.8);border:1px solid rgba(130,150,160,0.18);border-radius:4px;font:500 12px/1 'IBM Plex Mono',monospace;letter-spacing:0.04em;color:#cdd8de;">
+        <span style="width:7px;height:7px;border-radius:50%;background:#35d6ff;box-shadow:0 0 8px #35d6ff;animation:amBlink 2.4s ease-in-out infinite;"></span>
+        1 TEAM LIVE
+      </div>
+      <div style="width:34px;height:34px;display:grid;place-items:center;background:rgba(12,17,22,0.8);border:1px solid rgba(130,150,160,0.18);border-radius:4px;font:600 13px/1 'Space Grotesk',sans-serif;color:#cdd8de;">Aa</div>
+      <div style="width:34px;height:34px;display:grid;place-items:center;background:rgba(12,17,22,0.8);border:1px solid rgba(130,150,160,0.18);border-radius:4px;">
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="#cdd8de" stroke-width="1.3"><path d="M12.5 6 A5 5 0 1 0 13 9"/><path d="M12.5 2 L12.5 6 L8.5 6"/></svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- TRACKING PANEL -->
+  <div style="position:absolute;top:76px;left:84px;width:264px;background:rgba(9,13,17,0.74);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(130,150,160,0.16);border-radius:5px;z-index:10;">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid rgba(130,150,160,0.12);">
+      <span style="font:700 11px/1 'Space Grotesk',sans-serif;letter-spacing:0.24em;color:#8b98a0;">TRACKING</span>
+      <span style="width:6px;height:6px;border-radius:50%;background:#6f7d85;"></span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:rgba(130,150,160,0.1);border-bottom:1px solid rgba(130,150,160,0.12);">
+      <div style="background:rgba(9,13,17,0.6);padding:11px 12px;">
+        <div style="font:600 20px/1 'Space Grotesk',sans-serif;color:#eef4f7;">4</div>
+        <div style="margin-top:5px;font:500 9px/1 'IBM Plex Mono',monospace;letter-spacing:0.16em;color:#6f7d85;">SEATS</div>
+      </div>
+      <div style="background:rgba(9,13,17,0.6);padding:11px 12px;">
+        <div style="font:600 20px/1 'Space Grotesk',sans-serif;color:#eef4f7;">4</div>
+        <div style="margin-top:5px;font:500 9px/1 'IBM Plex Mono',monospace;letter-spacing:0.16em;color:#6f7d85;">LINKS</div>
+      </div>
+      <div style="background:rgba(9,13,17,0.6);padding:11px 12px;">
+        <div style="font:600 20px/1 'Space Grotesk',sans-serif;color:#eef4f7;">1</div>
+        <div style="margin-top:5px;font:500 9px/1 'IBM Plex Mono',monospace;letter-spacing:0.16em;color:#6f7d85;">HUMAN</div>
+      </div>
+    </div>
+    <div style="padding:10px 14px 12px;display:flex;flex-direction:column;gap:8px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:0.06em;">
+        <span style="display:flex;align-items:center;gap:8px;color:#dfe8ee;"><span style="width:6px;height:6px;background:#c3ced4;"></span>ORCH · C1</span>
+        <span style="color:#e6eef3;letter-spacing:0.14em;">LIVE</span>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:0.06em;">
+        <span style="display:flex;align-items:center;gap:8px;color:#9aa7ae;"><span style="width:6px;height:6px;background:#4f5c64;"></span>AGT · W1</span>
+        <span style="color:#6f7d85;letter-spacing:0.14em;">IDLE</span>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:0.06em;">
+        <span style="display:flex;align-items:center;gap:8px;color:#dfe8ee;"><span style="width:6px;height:6px;background:#c3ced4;"></span>AGT · W2</span>
+        <span style="color:#e6eef3;letter-spacing:0.14em;">ACTIVE</span>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:0.06em;">
+        <span style="display:flex;align-items:center;gap:8px;color:#9aa7ae;"><span style="width:6px;height:6px;background:#4f5c64;"></span>SUB · grok</span>
+        <span style="color:#e6eef3;letter-spacing:0.14em;">ACTIVE</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- YOU · HUMAN PANEL -->
+  <div style="position:absolute;top:352px;left:84px;width:264px;background:rgba(9,13,17,0.74);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(130,150,160,0.16);border-radius:5px;z-index:10;">
+    <div style="display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid rgba(130,150,160,0.12);">
+      <span style="width:7px;height:7px;background:#ffb43a;box-shadow:0 0 7px #ffb43a;"></span>
+      <span style="font:700 11px/1 'Space Grotesk',sans-serif;letter-spacing:0.22em;color:#ffb43a;">YOU · HUMAN</span>
+    </div>
+    <div style="padding:12px 14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;height:36px;padding:0 12px;background:rgba(14,19,25,0.8);border:1px solid rgba(130,150,160,0.16);border-radius:4px;font:500 12px/1 'IBM Plex Mono',monospace;color:#dfe8ee;">
+        Orchestrator · Umbra v0.1
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="#7a8890" stroke-width="1.4"><path d="M3 4 L5.5 1.5 L8 4"/><path d="M3 7 L5.5 9.5 L8 7"/></svg>
+      </div>
+      <div style="margin-top:14px;font:500 11px/1 'IBM Plex Mono',monospace;color:#8b98a0;letter-spacing:0.04em;">No open asks.</div>
+      <div style="margin-top:12px;font:500 9px/1 'IBM Plex Mono',monospace;letter-spacing:0.2em;color:#5f6d75;">— RECENT —</div>
+      <div style="margin-top:10px;padding-left:10px;border-left:2px solid rgba(53,214,255,0.4);">
+        <div style="font:500 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:0.06em;color:#6f7d85;">YOU · 2026-07-20T02:11:26Z</div>
+        <div style="margin-top:5px;font:500 12px/1.3 'IBM Plex Mono',monospace;color:#cdd8de;">Hi</div>
+      </div>
+      <div style="margin-top:12px;padding-left:10px;border-left:2px solid rgba(53,214,255,0.4);">
+        <div style="font:500 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:0.06em;color:#6f7d85;">YOU · 2026-07-20T02:15:32Z</div>
+        <div style="margin-top:5px;font:500 12px/1.3 'IBM Plex Mono',monospace;color:#cdd8de;">Ask grok to say hi to Claude</div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;">
+        <input placeholder="Message selected" style="flex:1;height:36px;padding:0 12px;background:rgba(14,19,25,0.9);border:1px solid rgba(130,150,160,0.18);border-radius:4px;font:500 12px/1 'IBM Plex Mono',monospace;color:#dfe8ee;outline:none;"/>
+        <button style="height:36px;padding:0 16px;background:rgba(53,214,255,0.14);border:1px solid rgba(53,214,255,0.4);border-radius:4px;font:600 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.06em;color:#7ee6ff;cursor:pointer;">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- LEGEND -->
+  <div style="position:absolute;top:76px;right:24px;width:214px;background:rgba(9,13,17,0.74);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(130,150,160,0.16);border-radius:5px;z-index:10;padding:14px;">
+    <div style="font:700 10px/1 'Space Grotesk',sans-serif;letter-spacing:0.24em;color:#8b98a0;margin-bottom:12px;">LEGEND</div>
+    <div style="display:flex;flex-direction:column;gap:11px;font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:0.04em;">
+      <div style="display:flex;align-items:center;gap:10px;color:#9aa7ae;"><span style="width:18px;height:0;border-top:1px solid #6f7d85;"></span>Idle link</div>
+      <div style="display:flex;align-items:center;gap:10px;color:#9aa7ae;"><span style="width:18px;height:0;border-top:2px dashed #35d6ff;"></span>Active / job</div>
+      <div style="height:1px;background:rgba(130,150,160,0.12);margin:2px 0;"></div>
+      <div style="display:flex;align-items:center;gap:10px;color:#dfe8ee;"><span style="width:9px;height:9px;background:#ffb43a;box-shadow:0 0 7px #ffb43a;"></span>You (human)</div>
+      <div style="display:flex;align-items:center;gap:10px;color:#dfe8ee;"><span style="width:9px;height:9px;background:#35d6ff;box-shadow:0 0 7px #35d6ff;"></span>Orchestrator</div>
+      <div style="display:flex;align-items:center;gap:10px;color:#dfe8ee;"><span style="width:9px;height:9px;background:#ff53c8;box-shadow:0 0 7px #ff53c8;"></span>Agent</div>
+      <div style="display:flex;align-items:center;gap:10px;color:#dfe8ee;"><span style="width:9px;height:9px;background:#a98bff;box-shadow:0 0 7px #a98bff;"></span>Sub-agent</div>
+    </div>
+  </div>
+
+  <!-- timeline is rendered as a flat 3D ruler in the scene (see logic) -->
+
+  <!-- HINT -->
+  <div style="position:absolute;left:0;right:0;bottom:150px;text-align:center;z-index:8;font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:0.14em;color:#4f5c64;pointer-events:none;">
+    ORBIT · ZOOM · HOVER · CLICK MARK → CARD · OPEN → TERMINAL
+  </div>
+
+  <!-- MODE TOOLBAR -->
+  <div style="position:absolute;left:50%;transform:translateX(-50%);bottom:88px;z-index:10;display:flex;align-items:center;gap:4px;padding:6px;background:rgba(9,13,17,0.82);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(130,150,160,0.16);border-radius:6px;">
+    <button style="height:34px;padding:0 18px;background:rgba(53,214,255,0.16);border:1px solid rgba(53,214,255,0.4);border-radius:4px;font:600 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.06em;color:#7ee6ff;cursor:pointer;">Orbit</button>
+    <button style="height:34px;padding:0 16px;background:transparent;border:1px solid transparent;border-radius:4px;font:600 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.06em;color:#9aa7ae;cursor:pointer;">Move</button>
+    <button style="height:34px;padding:0 16px;background:transparent;border:1px solid transparent;border-radius:4px;font:600 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.06em;color:#9aa7ae;cursor:pointer;">Flow</button>
+    <button style="height:34px;padding:0 16px;background:transparent;border:1px solid transparent;border-radius:4px;font:600 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.06em;color:#9aa7ae;cursor:pointer;">Flip →</button>
+    <div style="width:1px;height:20px;background:rgba(130,150,160,0.16);margin:0 4px;"></div>
+    <button style="height:34px;padding:0 16px;background:rgba(14,19,25,0.9);border:1px solid rgba(130,150,160,0.2);border-radius:4px;font:600 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.06em;color:#cdd8de;cursor:pointer;">Design flow…</button>
+  </div>
+
+  <!-- CONTROLS TOOLBAR -->
+  <div style="position:absolute;left:50%;transform:translateX(-50%);bottom:32px;z-index:10;display:flex;align-items:center;gap:4px;padding:6px;background:rgba(9,13,17,0.82);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(130,150,160,0.16);border-radius:6px;">
+    <button onClick="{{ view2d }}" style="height:34px;padding:0 16px;background:rgba(14,19,25,0.9);border:1px solid rgba(130,150,160,0.2);border-radius:4px;font:600 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.06em;color:#cdd8de;cursor:pointer;">2D</button>
+    <button onClick="{{ zoomOut }}" style="width:34px;height:34px;background:rgba(14,19,25,0.9);border:1px solid rgba(130,150,160,0.2);border-radius:4px;font:600 16px/1 'Space Grotesk',sans-serif;color:#cdd8de;cursor:pointer;">−</button>
+    <button onClick="{{ zoomIn }}" style="width:34px;height:34px;background:rgba(14,19,25,0.9);border:1px solid rgba(130,150,160,0.2);border-radius:4px;font:600 16px/1 'Space Grotesk',sans-serif;color:#cdd8de;cursor:pointer;">+</button>
+    <button onClick="{{ fit }}" style="height:34px;padding:0 16px;background:rgba(14,19,25,0.9);border:1px solid rgba(130,150,160,0.2);border-radius:4px;font:600 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.06em;color:#cdd8de;cursor:pointer;">Fit</button>
+    <button style="height:34px;padding:0 16px;background:rgba(14,19,25,0.9);border:1px solid rgba(130,150,160,0.2);border-radius:4px;font:600 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.06em;color:#cdd8de;cursor:pointer;">Terminals</button>
+    <button style="height:34px;padding:0 18px;background:#eef4f7;border:1px solid #eef4f7;border-radius:4px;font:700 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.04em;color:#0a0f14;cursor:pointer;">New team</button>
+  </div>
+
+  <!-- ===================== MISSION ===================== -->
+  <sc-if value="{{ isMission }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;top:60px;left:64px;right:0;bottom:0;overflow:auto;background:#06090d;z-index:20;">
+    <div style="max-width:1200px;margin:0 auto;padding:34px 40px 64px;">
+      <div style="font:700 40px/1 'Space Grotesk',sans-serif;letter-spacing:-0.01em;color:#f2f6f8;">Mission</div>
+      <div style="margin-top:11px;font:600 12px/1 'IBM Plex Mono',monospace;letter-spacing:0.22em;color:#6f7d85;">CONTROL PLANE · OFFLINE</div>
+      <div style="height:1px;background:rgba(130,150,160,0.14);margin:22px 0 22px;"></div>
+
+      <div style="border:1px solid rgba(130,150,160,0.16);border-left:2px solid rgba(53,214,255,0.5);border-radius:6px;background:rgba(10,14,18,0.6);padding:16px 20px;">
+        <div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:0.14em;color:#7a8890;">WHAT'S HAPPENING</div>
+        <div style="margin-top:9px;font:600 17px/1.3 'Space Grotesk',sans-serif;color:#eef4f7;">Queues clear. Conductor can assign the next job.</div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:16px;">
+        <div style="background:rgba(10,14,18,0.6);border:1px solid rgba(130,150,160,0.14);border-radius:7px;padding:18px 18px 15px;">
+          <div style="font:500 12px/1 'IBM Plex Mono',monospace;color:#7a8890;">Open jobs</div>
+          <div style="margin-top:13px;font:700 40px/1 'Space Grotesk',sans-serif;color:#f2f6f8;">0</div>
+          <div style="margin-top:11px;font:500 11px/1 'IBM Plex Mono',monospace;color:#6f7d85;">In flight</div>
+        </div>
+        <div style="background:rgba(10,14,18,0.6);border:1px solid rgba(130,150,160,0.14);border-radius:7px;padding:18px 18px 15px;">
+          <div style="font:500 12px/1 'IBM Plex Mono',monospace;color:#7a8890;">Accept rate</div>
+          <div style="margin-top:13px;font:700 40px/1 'Space Grotesk',sans-serif;color:#f2f6f8;">85%</div>
+          <div style="margin-top:11px;font:500 11px/1 'IBM Plex Mono',monospace;color:#6f7d85;">28 rounds</div>
+        </div>
+        <div style="background:rgba(10,14,18,0.6);border:1px solid rgba(130,150,160,0.14);border-radius:7px;padding:18px 18px 15px;">
+          <div style="font:500 12px/1 'IBM Plex Mono',monospace;color:#7a8890;">Seats</div>
+          <div style="margin-top:13px;font:700 40px/1 'Space Grotesk',sans-serif;color:#f2f6f8;">5</div>
+          <div style="margin-top:11px;font:500 11px/1 'IBM Plex Mono',monospace;color:#6f7d85;">2 teams</div>
+        </div>
+        <div style="background:rgba(10,14,18,0.6);border:1px solid rgba(130,150,160,0.14);border-top:2px solid rgba(255,180,58,0.45);border-radius:7px;padding:18px 18px 15px;">
+          <div style="font:500 12px/1 'IBM Plex Mono',monospace;color:#7a8890;">Reject streak</div>
+          <div style="margin-top:13px;font:700 40px/1 'Space Grotesk',sans-serif;color:#f2f6f8;">0</div>
+          <div style="margin-top:11px;font:500 11px/1 'IBM Plex Mono',monospace;color:#6f7d85;">Current</div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1.5fr 1fr;gap:14px;margin-top:14px;">
+        <div style="background:rgba(10,14,18,0.6);border:1px solid rgba(130,150,160,0.14);border-radius:7px;padding:18px 20px 14px;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;">
+            <div style="font:600 13px/1 'Space Grotesk',sans-serif;letter-spacing:0.02em;color:#e6eef3;">Job throughput</div>
+            <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:0.16em;color:#6f7d85;">LAST 24H</div>
+          </div>
+          <svg viewBox="0 0 600 150" preserveAspectRatio="none" style="width:100%;height:150px;margin-top:14px;display:block;">
+            <defs><linearGradient id="thrG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#35d6ff" stop-opacity="0.26"/><stop offset="1" stop-color="#35d6ff" stop-opacity="0"/></linearGradient></defs>
+            <line x1="20" y1="34" x2="580" y2="34" stroke="rgba(130,150,160,0.09)"/>
+            <line x1="20" y1="77" x2="580" y2="77" stroke="rgba(130,150,160,0.09)"/>
+            <line x1="20" y1="120" x2="580" y2="120" stroke="rgba(130,150,160,0.16)"/>
+            <path d="M20,120 L20,90 L71,75 L122,82 L173,60 L224,68 L275,50 L326,56 L377,40 L428,48 L479,32 L530,42 L580,28 L580,120 Z" fill="url(#thrG)"/>
+            <polyline points="20,90 71,75 122,82 173,60 224,68 275,50 326,56 377,40 428,48 479,32 530,42 580,28" fill="none" stroke="#35d6ff" stroke-width="2" stroke-opacity="0.85" stroke-linejoin="round"/>
+          </svg>
+          <div style="display:flex;justify-content:space-between;margin-top:6px;font:500 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:0.08em;color:#5f6d75;"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>NOW</span></div>
+        </div>
+        <div style="background:rgba(10,14,18,0.6);border:1px solid rgba(130,150,160,0.14);border-radius:7px;padding:18px 20px;">
+          <div style="font:600 13px/1 'Space Grotesk',sans-serif;color:#e6eef3;">Jobs by status</div>
+          <div style="display:flex;flex-direction:column;gap:13px;margin-top:17px;">
+            <div><div style="display:flex;justify-content:space-between;font:500 11px/1 'IBM Plex Mono',monospace;color:#9aa7ae;margin-bottom:6px;"><span>done</span><span style="color:#e6eef3;">14</span></div><div style="height:6px;background:rgba(130,150,160,0.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:100%;background:rgba(53,214,255,0.5);"></div></div></div>
+            <div><div style="display:flex;justify-content:space-between;font:500 11px/1 'IBM Plex Mono',monospace;color:#9aa7ae;margin-bottom:6px;"><span>notified</span><span style="color:#e6eef3;">9</span></div><div style="height:6px;background:rgba(130,150,160,0.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:64%;background:rgba(120,140,150,0.55);"></div></div></div>
+            <div><div style="display:flex;justify-content:space-between;font:500 11px/1 'IBM Plex Mono',monospace;color:#9aa7ae;margin-bottom:6px;"><span>claimed</span><span style="color:#e6eef3;">7</span></div><div style="height:6px;background:rgba(130,150,160,0.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:50%;background:rgba(120,140,150,0.55);"></div></div></div>
+            <div><div style="display:flex;justify-content:space-between;font:500 11px/1 'IBM Plex Mono',monospace;color:#9aa7ae;margin-bottom:6px;"><span>dispatched</span><span style="color:#e6eef3;">5</span></div><div style="height:6px;background:rgba(130,150,160,0.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:36%;background:rgba(120,140,150,0.55);"></div></div></div>
+            <div><div style="display:flex;justify-content:space-between;font:500 11px/1 'IBM Plex Mono',monospace;color:#9aa7ae;margin-bottom:6px;"><span>created</span><span style="color:#e6eef3;">4</span></div><div style="height:6px;background:rgba(130,150,160,0.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:28%;background:rgba(120,140,150,0.55);"></div></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px;">
+        <div style="background:rgba(10,14,18,0.6);border:1px solid rgba(130,150,160,0.14);border-radius:7px;padding:18px 20px 14px;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;">
+            <div style="font:600 13px/1 'Space Grotesk',sans-serif;color:#e6eef3;">Accept rate trend</div>
+            <div style="font:500 10px/1 'IBM Plex Mono',monospace;letter-spacing:0.16em;color:#6f7d85;">28 ROUNDS</div>
+          </div>
+          <svg viewBox="0 0 600 150" preserveAspectRatio="none" style="width:100%;height:150px;margin-top:14px;display:block;">
+            <line x1="20" y1="34" x2="580" y2="34" stroke="rgba(130,150,160,0.09)"/>
+            <line x1="20" y1="77" x2="580" y2="77" stroke="rgba(130,150,160,0.09)"/>
+            <line x1="20" y1="120" x2="580" y2="120" stroke="rgba(130,150,160,0.16)"/>
+            <polyline points="20,72 71,66 122,70 173,58 224,60 275,52 326,55 377,48 428,50 479,44 530,46 580,40" fill="none" stroke="#c3ced4" stroke-width="2" stroke-opacity="0.75" stroke-linejoin="round"/>
+          </svg>
+          <div style="display:flex;justify-content:space-between;margin-top:6px;font:500 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:0.08em;color:#5f6d75;"><span>R1</span><span>R14</span><span>R28</span></div>
+        </div>
+        <div style="background:rgba(10,14,18,0.6);border:1px solid rgba(130,150,160,0.14);border-radius:7px;padding:18px 20px;">
+          <div style="font:600 13px/1 'Space Grotesk',sans-serif;color:#e6eef3;">Seat utilization</div>
+          <div style="display:flex;align-items:flex-end;gap:14px;height:120px;margin-top:16px;">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;"><div style="font:600 10px/1 'IBM Plex Mono',monospace;color:#7a8890;margin-bottom:6px;">90%</div><div style="width:100%;max-width:34px;height:90%;background:linear-gradient(180deg,rgba(53,214,255,0.45),rgba(53,214,255,0.08));border-top:2px solid rgba(53,214,255,0.65);border-radius:2px 2px 0 0;"></div></div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;"><div style="font:600 10px/1 'IBM Plex Mono',monospace;color:#7a8890;margin-bottom:6px;">20%</div><div style="width:100%;max-width:34px;height:20%;background:linear-gradient(180deg,rgba(150,165,175,0.35),rgba(150,165,175,0.06));border-top:2px solid rgba(150,165,175,0.5);border-radius:2px 2px 0 0;"></div></div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;"><div style="font:600 10px/1 'IBM Plex Mono',monospace;color:#7a8890;margin-bottom:6px;">75%</div><div style="width:100%;max-width:34px;height:75%;background:linear-gradient(180deg,rgba(53,214,255,0.45),rgba(53,214,255,0.08));border-top:2px solid rgba(53,214,255,0.65);border-radius:2px 2px 0 0;"></div></div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;"><div style="font:600 10px/1 'IBM Plex Mono',monospace;color:#7a8890;margin-bottom:6px;">40%</div><div style="width:100%;max-width:34px;height:40%;background:linear-gradient(180deg,rgba(150,165,175,0.35),rgba(150,165,175,0.06));border-top:2px solid rgba(150,165,175,0.5);border-radius:2px 2px 0 0;"></div></div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;"><div style="font:600 10px/1 'IBM Plex Mono',monospace;color:#7a8890;margin-bottom:6px;">12%</div><div style="width:100%;max-width:34px;height:12%;background:linear-gradient(180deg,rgba(150,165,175,0.35),rgba(150,165,175,0.06));border-top:2px solid rgba(150,165,175,0.5);border-radius:2px 2px 0 0;"></div></div>
+          </div>
+          <div style="display:flex;gap:14px;margin-top:9px;"><span style="flex:1;text-align:center;font:500 10px/1 'IBM Plex Mono',monospace;color:#9aa7ae;">C1</span><span style="flex:1;text-align:center;font:500 10px/1 'IBM Plex Mono',monospace;color:#9aa7ae;">W1</span><span style="flex:1;text-align:center;font:500 10px/1 'IBM Plex Mono',monospace;color:#9aa7ae;">W2</span><span style="flex:1;text-align:center;font:500 10px/1 'IBM Plex Mono',monospace;color:#9aa7ae;">W3</span><span style="flex:1;text-align:center;font:500 10px/1 'IBM Plex Mono',monospace;color:#9aa7ae;">W4</span></div>
+        </div>
+      </div>
+
+      <div style="margin-top:24px;">
+        <div style="font:700 12px/1 'Space Grotesk',sans-serif;letter-spacing:0.2em;color:#8b98a0;margin-bottom:12px;">ACTIVITY</div>
+        <div style="background:rgba(10,14,18,0.5);border:1px solid rgba(130,150,160,0.12);border-radius:7px;overflow:hidden;">
+          <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border-bottom:1px solid rgba(130,150,160,0.07);font:500 13px/1 'IBM Plex Mono',monospace;color:#c3ced4;"><span style="color:#7a8890;min-width:104px;">job.status</span><span style="flex:1;">job_20260719_221604_58ca1b</span><span style="color:#6f7d85;">· done</span></div>
+          <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border-bottom:1px solid rgba(130,150,160,0.07);font:500 13px/1 'IBM Plex Mono',monospace;color:#c3ced4;"><span style="color:#7a8890;min-width:104px;">job.claim</span><span style="flex:1;">job_20260719_221604_58ca1b</span><span style="color:#6f7d85;"></span></div>
+          <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border-bottom:1px solid rgba(130,150,160,0.07);font:500 13px/1 'IBM Plex Mono',monospace;color:#c3ced4;"><span style="color:#7a8890;min-width:104px;">job.status</span><span style="flex:1;">job_20260719_221604_58ca1b</span><span style="color:#6f7d85;">· notified</span></div>
+          <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border-bottom:1px solid rgba(130,150,160,0.07);font:500 13px/1 'IBM Plex Mono',monospace;color:#c3ced4;"><span style="color:#7a8890;min-width:104px;">job.dispatch</span><span style="flex:1;">job_20260719_221604_58ca1b</span><span style="color:#6f7d85;">· notified</span></div>
+          <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border-bottom:1px solid rgba(130,150,160,0.07);font:500 13px/1 'IBM Plex Mono',monospace;color:#c3ced4;"><span style="color:#7a8890;min-width:104px;">job.created</span><span style="flex:1;">job_20260719_221604_58ca1b</span><span style="color:#6f7d85;"></span></div>
+          <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;font:500 13px/1 'IBM Plex Mono',monospace;color:#c3ced4;"><span style="color:#7a8890;min-width:104px;">job.status</span><span style="flex:1;">job_20260719_221538_77ecfc</span><span style="color:#6f7d85;">· done</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ===================== SETUP ===================== -->
+  <sc-if value="{{ isSetup }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;top:60px;left:64px;right:0;bottom:0;overflow:auto;background:#06090d;z-index:20;">
+    <div style="max-width:1120px;margin:0 auto;padding:34px 40px 64px;">
+      <div style="font:700 40px/1 'Space Grotesk',sans-serif;letter-spacing:-0.01em;color:#f2f6f8;">Setup</div>
+      <div style="margin-top:12px;font:500 14px/1 'IBM Plex Mono',monospace;color:#8b98a0;">Architect a team, link terminals, or open saved layouts.</div>
+      <div style="height:1px;background:rgba(130,150,160,0.14);margin:24px 0;"></div>
+
+      <div style="border:1px solid rgba(199,242,77,0.5);border-radius:9px;background:rgba(10,14,18,0.6);padding:26px 28px;display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:16px;">
+        <div><div style="font:700 20px/1 'Space Grotesk',sans-serif;color:#f2f6f8;">New team</div><div style="margin-top:12px;font:500 13px/1.5 'IBM Plex Mono',monospace;color:#8b98a0;max-width:660px;">Guided architecture: draw seats &amp; flows, names, policy, SOUL.md / SKILL.md scaffold.</div></div>
+        <button style="height:44px;padding:0 26px;background:#c7f24d;border:none;border-radius:6px;font:700 14px/1 'Space Grotesk',sans-serif;color:#0a0f14;cursor:pointer;white-space:nowrap;">Build team</button>
+      </div>
+
+      <div style="border:1px solid rgba(130,150,160,0.16);border-radius:9px;background:rgba(10,14,18,0.6);padding:26px 28px;display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:16px;">
+        <div><div style="font:700 20px/1 'Space Grotesk',sans-serif;color:#f2f6f8;">Link terminals</div><div style="margin-top:12px;font:500 13px/1.5 'IBM Plex Mono',monospace;color:#8b98a0;max-width:660px;">Attach windows already running — keep model, chat, and resume as-is.</div></div>
+        <button style="height:44px;padding:0 26px;background:transparent;border:1px solid rgba(199,242,77,0.55);border-radius:6px;font:700 14px/1 'Space Grotesk',sans-serif;color:#c7f24d;cursor:pointer;white-space:nowrap;">Link…</button>
+      </div>
+
+      <div style="border:1px solid rgba(130,150,160,0.16);border-radius:9px;background:rgba(10,14,18,0.6);padding:26px 28px;display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:16px;">
+        <div><div style="font:700 20px/1 'Space Grotesk',sans-serif;color:#f2f6f8;">Saved teams</div><div style="margin-top:12px;font:500 13px/1.5 'IBM Plex Mono',monospace;color:#8b98a0;max-width:660px;">2 saved layouts. Open, duplicate, or delete.</div></div>
+        <button style="height:44px;padding:0 26px;background:transparent;border:1px solid rgba(199,242,77,0.55);border-radius:6px;font:700 14px/1 'Space Grotesk',sans-serif;color:#c7f24d;cursor:pointer;white-space:nowrap;">Manage</button>
+      </div>
+
+      <div style="border:1px solid rgba(130,150,160,0.16);border-radius:9px;background:rgba(10,14,18,0.4);padding:24px 28px;">
+        <div style="font:700 20px/1 'Space Grotesk',sans-serif;color:#f2f6f8;">Control plane</div>
+        <div style="margin-top:14px;font:500 13px/1.7 'IBM Plex Mono',monospace;color:#9aa7ae;">pong snapshot · pong job create · pong check</div>
+        <div style="margin-top:4px;font:500 13px/1.7 'IBM Plex Mono',monospace;color:#6f7d85;">Jobs are source of truth; canvas is how you see seats.</div>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:&quot;100%&quot;,&quot;height&quot;:&quot;100%&quot;},&quot;autoOrbit&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Map&quot;},&quot;showPlanes&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Map&quot;},&quot;showConnectors&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Map&quot;}}">
+class Component extends DCLogic {
+  state={ view:'command' };
+  renderVals(){
+    const v=this.state.view, A='rgba(255,255,255,0.08)', B='rgba(150,165,175,0.28)', T='transparent';
+    return {
+      fit: ()=> this._fit && this._fit(),
+      zoomIn: ()=> this._dolly && this._dolly(0.82),
+      zoomOut: ()=> this._dolly && this._dolly(1.22),
+      view2d: ()=> this._view2d && this._view2d(),
+      isCommand: v==='command', isMission: v==='mission', isSetup: v==='setup',
+      navCommand: ()=> this.setState({view:'command'}),
+      navMission: ()=> this.setState({view:'mission'}),
+      navSetup: ()=> this.setState({view:'setup'}),
+      railCmdBg: v==='command'?A:T, railCmdBd: v==='command'?B:T,
+      railMisBg: v==='mission'?A:T, railMisBd: v==='mission'?B:T,
+      railSetBg: v==='setup'?A:T, railSetBd: v==='setup'?B:T,
+    };
+  }
+  componentDidMount(){ this._raf=0; this._waitThree(()=>this._init()); }
+  componentWillUnmount(){ cancelAnimationFrame(this._raf); if(this._onResize) window.removeEventListener('resize', this._onResize); if(this._ro) this._ro.disconnect(); if(this._docClick) document.removeEventListener('click', this._docClick); }
+  componentDidUpdate(){ if(this._syncProps) this._syncProps(); if(this.state.view==='command' && this._onResize) this._onResize(); }
+  _waitThree(cb,t=0){ if(window.THREE && THREE.OrbitControls){cb();return;} if(t>200)return; setTimeout(()=>this._waitThree(cb,t+1),50); }
+
+  _glowTex(){
+    if(this._gt) return this._gt;
+    const c=document.createElement('canvas'); c.width=c.height=128; const g=c.getContext('2d');
+    const grd=g.createRadialGradient(64,64,0,64,64,64);
+    grd.addColorStop(0,'rgba(255,255,255,1)');
+    grd.addColorStop(0.22,'rgba(255,255,255,0.65)');
+    grd.addColorStop(1,'rgba(255,255,255,0)');
+    g.fillStyle=grd; g.fillRect(0,0,128,128);
+    this._gt=new THREE.CanvasTexture(c); return this._gt;
+  }
+
+  _glyph(g, role, cx, cy, col){
+    g.save(); g.strokeStyle=col; g.fillStyle=col; g.lineWidth=5; g.lineCap='round'; g.lineJoin='round';
+    g.textAlign='center'; g.textBaseline='middle';
+    g.lineWidth=4;
+    if(role==='ORCHESTRATOR'){ g.beginPath(); g.arc(cx,cy,15,0,Math.PI*2); g.stroke(); g.beginPath(); g.arc(cx,cy,7,0,Math.PI*2); g.stroke(); }
+    else if(role==='CODER'){ g.font='700 42px monospace'; g.fillText('{ }', cx, cy+2); }
+    else if(role==='RESEARCHER'){ g.beginPath(); g.arc(cx-3,cy-3,11,0,Math.PI*2); g.stroke(); g.beginPath(); g.moveTo(cx+5,cy+5); g.lineTo(cx+15,cy+15); g.stroke(); }
+    else if(role==='DELEGATE'){ g.beginPath(); g.arc(cx-13,cy,4,0,Math.PI*2); g.fill(); g.beginPath(); g.moveTo(cx-9,cy); g.lineTo(cx+10,cy-11); g.moveTo(cx-9,cy); g.lineTo(cx+10,cy+11); g.stroke(); g.beginPath(); g.arc(cx+13,cy-12,4,0,Math.PI*2); g.fill(); g.beginPath(); g.arc(cx+13,cy+12,4,0,Math.PI*2); g.fill(); }
+    else if(role==='AUDITOR'){ g.beginPath(); g.arc(cx,cy,14,0,Math.PI*2); g.stroke(); g.beginPath(); g.moveTo(cx-6,cy+1); g.lineTo(cx-1,cy+7); g.lineTo(cx+7,cy-5); g.stroke(); }
+    else if(role==='HUMAN'){ g.beginPath(); g.arc(cx,cy-7,5.5,0,Math.PI*2); g.stroke(); g.beginPath(); g.moveTo(cx-11,cy+14); g.quadraticCurveTo(cx,cy-2,cx+11,cy+14); g.stroke(); }
+    else { g.beginPath(); g.arc(cx,cy,6,0,Math.PI*2); g.fill(); }
+    g.restore();
+  }
+  _faceTex(n){
+    const c=document.createElement('canvas'); c.width=256; c.height=200; const g=c.getContext('2d');
+    const col='#'+n.color.toString(16).padStart(6,'0');
+    const idle=n.status==='IDLE';
+    g.fillStyle='rgba(7,11,15,0.92)'; g.fillRect(0,0,256,200);
+    g.globalAlpha=0.8; g.strokeStyle=col; g.lineWidth=2; g.strokeRect(4,4,248,192); g.globalAlpha=1;
+    // left accent spine
+    g.fillStyle=col; g.fillRect(4,4,4,192);
+    // glyph marker, top-left
+    this._glyph(g, n.role, 46, 48, '#eef4f7');
+    // status indicator, top-right
+    g.textBaseline='middle'; g.textAlign='right';
+    g.fillStyle=idle?'#6f7d85':'#e6eef3'; g.font='600 13px monospace';
+    const stW=g.measureText(n.status).width;
+    g.fillText(n.status, 232, 44);
+    g.beginPath(); g.arc(232-stW-11, 44, 4, 0, Math.PI*2); g.fillStyle=idle?'#4f5c64':col; g.fill();
+    // divider
+    g.strokeStyle='rgba(130,150,160,0.2)'; g.lineWidth=1; g.beginPath(); g.moveTo(22,86); g.lineTo(234,86); g.stroke();
+    // role eyebrow
+    g.textAlign='left'; g.textBaseline='alphabetic'; g.letterSpacing='2.5px';
+    g.fillStyle=col; g.font='600 13px monospace'; g.fillText(n.role, 22, 122);
+    // name (primary), auto-fit
+    g.letterSpacing='0px';
+    let fs=31; g.font='700 '+fs+'px sans-serif';
+    while(g.measureText(n.name).width>210 && fs>16){ fs-=1; g.font='700 '+fs+'px sans-serif'; }
+    g.fillStyle='#f2f6f8'; g.fillText(n.name, 22, 158);
+    const tex=new THREE.CanvasTexture(c); tex.anisotropy=8; return tex;
+  }
+
+  _init(){
+    const stage=document.getElementById('am-stage');
+    const overlay=document.getElementById('am-labels');
+    if(!stage) return;
+    const W=()=>stage.clientWidth||1, H=()=>stage.clientHeight||1;
+
+    const scene=new THREE.Scene();
+    const camera=new THREE.PerspectiveCamera(42, W()/H(), 0.1, 600);
+    camera.position.set(27,19,35);
+    const renderer=new THREE.WebGLRenderer({antialias:true, alpha:true});
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+    renderer.setSize(W(),H());
+    renderer.setClearColor(0x000000,0);
+    renderer.domElement.style.display='block';
+    stage.appendChild(renderer.domElement);
+
+    const controls=new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping=true; controls.dampingFactor=0.08;
+    controls.minDistance=16; controls.maxDistance=90;
+    controls.minPolarAngle=0.18; controls.maxPolarAngle=1.46;
+    controls.target.set(0,0.5,0);
+    controls.autoRotate=!!this.props.autoOrbit; controls.autoRotateSpeed=0.55;
+
+    scene.add(new THREE.AmbientLight(0xffffff,0.65));
+    const dir=new THREE.DirectionalLight(0xbfe9ff,0.55); dir.position.set(12,32,18); scene.add(dir);
+
+    const CY=0x35d6ff, MG=0xff53c8, VI=0xa98bff, AM=0xffb43a, DIM=0x2a3742;
+    const HALF=12, DIV=12, GAP=10;
+    const LAYERS=[
+      {key:'orch', y:GAP, idx:'01', title:'ORCHESTRATOR', color:CY},
+      {key:'agent', y:0, idx:'02', title:'AGENTS', color:MG},
+      {key:'sub', y:-GAP, idx:'03', title:'SUB-AGENTS', color:VI},
+    ];
+
+    // ---- PLANES (the redesigned level floors) ----
+    const planesGroup=new THREE.Group(); scene.add(planesGroup); this._planesGroup=planesGroup;
+    const dispose=[];
+    const line=(pts,color,op)=>{ const g=new THREE.BufferGeometry().setFromPoints(pts.map(p=>new THREE.Vector3(p[0],p[1],p[2]))); return new THREE.Line(g,new THREE.LineBasicMaterial({color,transparent:true,opacity:op})); };
+
+    LAYERS.forEach(L=>{
+      const g=new THREE.Group(); g.position.y=L.y;
+      // soft glowing surface tint
+      const fill=new THREE.Mesh(new THREE.PlaneGeometry(HALF*2,HALF*2), new THREE.MeshBasicMaterial({color:L.color,transparent:true,opacity:0.03,depthWrite:false,side:THREE.DoubleSide}));
+      fill.rotation.x=-Math.PI/2; g.add(fill);
+      // dotted grid (subtle)
+      const dotPos=[]; const step=(HALF*2)/DIV;
+      for(let i=0;i<=DIV;i++){ for(let j=0;j<=DIV;j++){ dotPos.push(-HALF+i*step,0.01,-HALF+j*step); } }
+      const dg=new THREE.BufferGeometry(); dg.setAttribute('position',new THREE.Float32BufferAttribute(dotPos,3));
+      const dots=new THREE.Points(dg, new THREE.PointsMaterial({color:DIM,size:2.2,sizeAttenuation:false,transparent:true,opacity:0.55,depthWrite:false}));
+      g.add(dots);
+      // accent cross-hair through center
+      g.add(line([[-HALF,0.02,0],[HALF,0.02,0]], L.color, 0.1));
+      g.add(line([[0,0.02,-HALF],[0,0.02,HALF]], L.color, 0.1));
+      // rim frame
+      g.add(line([[-HALF,0,-HALF],[HALF,0,-HALF],[HALF,0,HALF],[-HALF,0,HALF],[-HALF,0,-HALF]], L.color, 0.32));
+      // corner brackets
+      const b=2.2;
+      const corners=[[-HALF,-HALF,1,1],[HALF,-HALF,-1,1],[HALF,HALF,-1,-1],[-HALF,HALF,1,-1]];
+      corners.forEach(([x,z,sx,sz])=>{
+        g.add(line([[x+sx*b,0.01,z],[x,0.01,z],[x,0.01,z+sz*b]], L.color, 0.55));
+      });
+      // range ring (radar feel)
+      const ringPts=[]; for(let i=0;i<=64;i++){const a=i/64*Math.PI*2; ringPts.push([Math.cos(a)*7.5,0.01,Math.sin(a)*7.5]);}
+      g.add(line(ringPts, L.color, 0.07));
+      planesGroup.add(g);
+    });
+
+    // ---- NODES (cubes stay) ----
+    const NODES=[
+      {id:'C1', name:'Orchestrator', role:'ORCHESTRATOR', status:'LIVE', layer:'orch', x:0, z:0, color:CY, sel:true},
+      {id:'W1', name:'Grok Build', role:'CODER', status:'IDLE', layer:'agent', x:-7, z:-1, color:MG},
+      {id:'W2', name:'Claude Probe', role:'RESEARCHER', status:'ACTIVE', layer:'agent', x:7, z:-3, color:MG},
+      {id:'WY', name:'Relay', role:'DELEGATE', status:'IDLE', layer:'agent', x:0, z:7, color:MG},
+      {id:'S1', name:'Grok Audit', role:'AUDITOR', status:'ACTIVE', layer:'sub', x:-7.5, z:-1.5, color:VI},
+      {id:'S2', name:'Claude Build', role:'CODER', status:'IDLE', layer:'sub', x:7.5, z:-3.5, color:VI},
+      {id:'S3', name:'o3 Probe', role:'RESEARCHER', status:'IDLE', layer:'sub', x:0.5, z:8, color:VI},
+    ];
+    this._bill=[]; this._grpById={}; this._rings=[];
+    const posOf={};
+    // distinct silhouette per level: hex-prism orch / cube agent / tri-prism sub
+    const shapeFor=(k)=>{
+      if(k==='orch') return {geo:new THREE.CylinderGeometry(1.4,1.4,2.0,6), h:2.0, rot:Math.PI/6, pz:1.46};
+      if(k==='sub')  return {geo:new THREE.CylinderGeometry(1.25,1.25,1.5,3), h:1.5, rot:Math.PI/2, pz:1.31};
+      return {geo:new THREE.BoxGeometry(1.9,1.9,1.9), h:1.9, rot:0, pz:1.0};
+    };
+    NODES.forEach(n=>{
+      const L=LAYERS.find(l=>l.key===n.layer);
+      const S=shapeFor(n.layer);
+      const cy=L.y+S.h/2+0.08;
+      const grp=new THREE.Group(); grp.position.set(n.x,cy,n.z);
+      const body=new THREE.Mesh(S.geo, new THREE.MeshBasicMaterial({color:0x0a1016,transparent:true,opacity:0.82}));
+      body.rotation.y=S.rot; grp.add(body);
+      const edges=new THREE.LineSegments(new THREE.EdgesGeometry(S.geo), new THREE.LineBasicMaterial({color:n.color}));
+      edges.rotation.y=S.rot; grp.add(edges);
+      // info face — child on +Z, yaw-billboarded with the group
+      const panel=new THREE.Mesh(new THREE.PlaneGeometry(1.7,1.7*200/256), new THREE.MeshBasicMaterial({map:this._faceTex(n),transparent:true,depthWrite:false}));
+      panel.position.set(0,0,S.pz); grp.add(panel);
+      const glow=new THREE.Sprite(new THREE.SpriteMaterial({map:this._glowTex(),color:n.color,transparent:true,opacity:0.16,blending:THREE.AdditiveBlending,depthWrite:false}));
+      glow.scale.set(4.6,4.6,1); grp.add(glow);
+      grp.add(line([[0,-S.h/2,0],[0,-S.h/2-0.08,0]], n.color, 0.6));
+      scene.add(grp);
+      this._grpById[n.id]=grp;
+      posOf[n.id]=new THREE.Vector3(n.x, cy+S.h/2, n.z);
+      const _act=(n.status==='ACTIVE'||n.status==='LIVE');
+      this._bill.push({grp, off:0.34, baseY:cy, active:_act, phase:Math.random()*6.28});
+      if(_act){
+        const ring=new THREE.Mesh(new THREE.RingGeometry(2.1,2.32,64), new THREE.MeshBasicMaterial({color:n.color,transparent:true,opacity:0.7,side:THREE.DoubleSide,depthWrite:false}));
+        ring.rotation.x=-Math.PI/2; ring.position.set(n.x, L.y+0.05, n.z); scene.add(ring);
+        this._rings.push({mesh:ring, phase:Math.random()*6.28});
+      }
+    });
+
+    // human marker
+    const hy=GAP+7;
+    const hg=new THREE.Group(); hg.position.set(0,hy,0);
+    hg.add(new THREE.Mesh(new THREE.OctahedronGeometry(1.1), new THREE.MeshBasicMaterial({color:0x0a1016,transparent:true,opacity:0.85})));
+    hg.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.OctahedronGeometry(1.1)), new THREE.LineBasicMaterial({color:AM})));
+    const hglow=new THREE.Sprite(new THREE.SpriteMaterial({map:this._glowTex(),color:AM,transparent:true,opacity:0.55,blending:THREE.AdditiveBlending,depthWrite:false}));
+    hglow.scale.set(5.5,5.5,1); hg.add(hglow);
+    scene.add(hg); this._human=hg;
+    posOf['HUMAN']=new THREE.Vector3(0,hy,0);
+
+    // ---- LINKS ----
+    const connGroup=new THREE.Group(); scene.add(connGroup); this._connGroup=connGroup;
+    this._pulses=[];
+    const LINKS=[
+      {a:'HUMAN', b:'C1', color:AM, active:false},
+      {a:'C1', b:'W1', color:CY, active:false},
+      {a:'C1', b:'W2', color:CY, active:true},
+      {a:'C1', b:'WY', color:CY, active:false},
+      {a:'W1', b:'S1', color:MG, active:true},
+      {a:'W2', b:'S2', color:MG, active:false},
+      {a:'WY', b:'S3', color:MG, active:false},
+    ];
+    LINKS.forEach(lk=>{
+      const A=posOf[lk.a], B=posOf[lk.b];
+      const l=new THREE.Line(new THREE.BufferGeometry().setFromPoints([A,B]), new THREE.LineBasicMaterial({color:lk.color,transparent:true,opacity:lk.active?0.85:0.32}));
+      connGroup.add(l);
+      if(lk.active){
+        const p=new THREE.Mesh(new THREE.SphereGeometry(0.24,12,12), new THREE.MeshBasicMaterial({color:lk.color}));
+        scene.add(p); this._pulses.push({mesh:p,a:A,b:B,off:Math.random()});
+      }
+    });
+
+    // ---- flat scrollable ruler timeline ----
+    const RX=15.5, RHALF=18, RW=2.8, WINH=72, LEADH=8, HOUR=3600000;
+    const uPerH=(RHALF*2)/WINH;
+    this._rulerOffsetH=0; this._rulerDirty=false;
+    const MON=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    const RCRONS=[
+      {name:'Perimeter sweep', h:0.25, ph:0, col:CY, owner:'C1'},
+      {name:'Snapshot', h:0.5, ph:0, col:CY, owner:'C1'},
+      {name:'Telemetry sync', h:1, ph:0, col:MG, owner:'W2'},
+      {name:'Log audit', h:6, ph:0, col:VI, owner:'S1'},
+      {name:'Model warmup', h:24, ph:4, col:MG, owner:'W1'},
+    ];
+    const rsurf=new THREE.Mesh(new THREE.PlaneGeometry(RW,RHALF*2), new THREE.MeshBasicMaterial({color:CY,transparent:true,opacity:0.035,side:THREE.DoubleSide,depthWrite:false}));
+    rsurf.rotation.x=-Math.PI/2; rsurf.position.set(RX,0.02,0); scene.add(rsurf);
+    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([[RX-RW/2,0.02,-RHALF],[RX+RW/2,0.02,-RHALF],[RX+RW/2,0.02,RHALF],[RX-RW/2,0.02,RHALF],[RX-RW/2,0.02,-RHALF]].map(p=>new THREE.Vector3(p[0],p[1],p[2]))), new THREE.LineBasicMaterial({color:CY,transparent:true,opacity:0.28})));
+    const rdyn=new THREE.Group(); scene.add(rdyn); this._rulerDyn=rdyn;
+    this._rulerLabels=[];
+    const mkRL=(pos,text,col,size,weight,align,dy)=>{ const el=document.createElement('div'); const tf=align==='r'?'translate(calc(-100% - 7px),-50%)':(align==='c'?'translate(-50%,-50%)':'translate(7px,-50%)'); el.style.cssText='position:absolute;pointer-events:none;transition:opacity .1s;white-space:nowrap;transform:'+tf+';font:'+(weight||600)+' '+size+'px IBM Plex Mono,monospace;letter-spacing:0.08em;color:'+col+';'; el.textContent=text; overlay.appendChild(el); this._rulerLabels.push({el,pos,dy:dy||0}); };
+    const clearRL=()=>{ this._rulerLabels.forEach(l=>l.el.remove()); this._rulerLabels=[]; };
+    const seg=(x1,z1,x2,z2,y,col,op)=>new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1,y,z1),new THREE.Vector3(x2,y,z2)]), new THREE.LineBasicMaterial({color:col,transparent:true,opacity:op}));
+    const rebuildRuler=()=>{
+      while(rdyn.children.length){ const c=rdyn.children.pop(); if(c.geometry)c.geometry.dispose(); if(c.material)c.material.dispose(); rdyn.remove(c); }
+      clearRL();
+      const startT=Date.now()-LEADH*HOUR+this._rulerOffsetH*HOUR, endT=startT+WINH*HOUR;
+      const zAt=t=>-RHALF+((t-startT)/HOUR)*uPerH;
+      for(let hh=Math.ceil(startT/HOUR)*HOUR; hh<=endT; hh+=HOUR){
+        const d=new Date(hh), z=zAt(hh), mid=d.getHours()===0, len=mid?1.3:(d.getHours()%6===0?0.7:0.32);
+        rdyn.add(seg(RX-len/2,z,RX+len/2,z,0.03, mid?0xc3ced4:0x6f7d85, mid?0.6:0.26));
+        if(mid) mkRL(new THREE.Vector3(RX+RW/2+0.4,0.05,z), MON[d.getMonth()]+' '+String(d.getDate()).padStart(2,'0'), '#c3ced4', 11, 700, 'l');
+      }
+      const nz=zAt(Date.now());
+      if(nz>=-RHALF&&nz<=RHALF){ rdyn.add(seg(RX-RW/2,nz,RX+RW/2,nz,0.04,0x7ee6ff,0.75)); mkRL(new THREE.Vector3(RX+RW/2+0.4,0.05,nz),'NOW','#7ee6ff',9,700,'l'); }
+      let _lane=0;
+      RCRONS.forEach(c=>{
+        const step=c.h*HOUR, ph=c.ph*HOUR, sp=c.h*uPerH;
+        if(sp>=0.5){ for(let t=Math.ceil((startT-ph)/step)*step+ph; t<=endT; t+=step){ const z=zAt(t); const dot=new THREE.Mesh(new THREE.SphereGeometry(0.1,8,8), new THREE.MeshBasicMaterial({color:c.col})); dot.position.set(RX,0.06,z); rdyn.add(dot); } }
+        let tn=Math.ceil((Date.now()-ph)/step)*step+ph;
+        if(tn>=startT&&tn<=endT){ const z=zAt(tn), owner=posOf[c.owner], A=new THREE.Vector3(RX,0.06,z);
+          const pin=new THREE.Mesh(new THREE.SphereGeometry(0.17,12,12), new THREE.MeshBasicMaterial({color:c.col})); pin.position.copy(A); rdyn.add(pin);
+          if(owner){ rdyn.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([A,owner.clone()]), new THREE.LineBasicMaterial({color:c.col,transparent:true,opacity:0.22}))); }
+          if(c.h>=1){ mkRL(new THREE.Vector3(RX-RW/2-0.4,0.06,z), c.name, '#e6eef3', 10, 600, 'r', _lane*17); _lane++; }
+        }
+      });
+    };
+    this._rulerRebuild=rebuildRuler; rebuildRuler();
+    const _tt=document.createElement('div'); _tt.style.cssText='position:absolute;pointer-events:none;white-space:nowrap;transform:translate(-50%,-50%);font:700 11px IBM Plex Mono,monospace;letter-spacing:0.18em;color:#8b98a0;'; _tt.textContent='TIMELINE'; overlay.appendChild(_tt); this._rulerTitle={el:_tt,pos:new THREE.Vector3(RX,0.05,-RHALF-1.3)};
+    // drag-to-scroll (no zoom); keeps camera fixed
+    const rray=new THREE.Raycaster(), rplane=new THREE.Plane(new THREE.Vector3(0,1,0),0), rndc=new THREE.Vector2(), rhit=new THREE.Vector3();
+    const groundPt=(e)=>{ const r=renderer.domElement.getBoundingClientRect(); rndc.x=((e.clientX-r.left)/r.width)*2-1; rndc.y=-((e.clientY-r.top)/r.height)*2+1; rray.setFromCamera(rndc,camera); return rray.ray.intersectPlane(rplane,rhit)?rhit.clone():null; };
+    let rdrag=false, rlastZ=0; const dom=renderer.domElement;
+    dom.addEventListener('pointerdown', e=>{ const p=groundPt(e); if(p && Math.abs(p.x-RX)<RW*1.5 && Math.abs(p.z)<RHALF+1.5){ rdrag=true; rlastZ=p.z; controls.enabled=false; dom.style.cursor='grabbing'; } });
+    dom.addEventListener('pointermove', e=>{ if(!rdrag) return; const p=groundPt(e); if(!p) return; this._rulerOffsetH -= (p.z-rlastZ)/uPerH; rlastZ=p.z; this._rulerDirty=true; });
+    const rend=()=>{ if(rdrag){ rdrag=false; controls.enabled=true; dom.style.cursor=''; } };
+    dom.addEventListener('pointerup', rend); dom.addEventListener('pointercancel', rend);
+
+    // ---- LABELS (HTML overlay) ----
+    const hex=c=>'#'+c.toString(16).padStart(6,'0');
+    this._labels=[];
+    // human label
+    (function(self){
+      const el=document.createElement('div');
+      el.style.cssText='position:absolute;transform:translate(-50%,-165%);pointer-events:none;transition:opacity .18s;text-align:left;white-space:nowrap;';
+      el.innerHTML='<div style="display:flex;align-items:center;gap:6px;font:600 10px/1 IBM Plex Mono,monospace;letter-spacing:0.09em;color:#ffe0a8;"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="'+hex(AM)+'" stroke-width="1.4"><circle cx="6" cy="3.6" r="2.2"/><path d="M2 11 Q6 4.8 10 11" stroke-linecap="round"/></svg>YOU</div><div style="margin-top:3px;padding-left:16px;font:500 8.5px/1 IBM Plex Mono,monospace;letter-spacing:0.12em;color:'+hex(AM)+';">HUMAN · OPERATOR</div>';
+      overlay.appendChild(el);
+      self._labels.push({el, pos:posOf['HUMAN']});
+    })(this);
+
+    // add-ports — anchored to cube faces, neutral (toned down)
+    this._ports=[];
+    const DIMS={orch:{hw:1.4,hh:1.0},agent:{hw:0.95,hh:0.95},sub:{hw:1.25,hh:0.75}};
+    const FACES={orch:['side'],agent:['side'],sub:['side']};
+    const mkPort=(grp,ox,oy,oz)=>{
+      const el=document.createElement('div');
+      el.title='Add';
+      el.style.cssText='position:absolute;pointer-events:auto;cursor:pointer;transform:translate(-50%,-50%);width:21px;height:21px;border-radius:50%;display:grid;place-items:center;opacity:0.5;transition:opacity .16s,box-shadow .16s,background .16s;background:rgba(9,13,17,0.72);border:1px solid rgba(160,175,185,0.35);';
+      el.innerHTML='<svg width="10" height="10" viewBox="0 0 11 11"><path d="M5.5 1 V10 M1 5.5 H10" stroke="#c3ced4" stroke-width="1.6" stroke-linecap="round"/></svg>';
+      el.onmouseenter=()=>{ el.style.opacity='1'; el.style.boxShadow='0 0 10px rgba(200,215,225,0.35)'; el.style.background='rgba(20,26,32,0.95)'; };
+      el.onmouseleave=()=>{ el.style.opacity='0.5'; el.style.boxShadow='none'; el.style.background='rgba(9,13,17,0.72)'; };
+      el.onclick=(e)=>{ e.stopPropagation(); const m=this._menu; if(!m) return; const L=parseFloat(el.style.left)||0, T=parseFloat(el.style.top)||0; m.style.left=(L+15)+'px'; m.style.top=(T-6)+'px'; m.style.display='block'; };
+      overlay.appendChild(el);
+      this._ports.push({el, grp, ox, oy, oz});
+    };
+    NODES.forEach(n=>{
+      const grp=this._grpById[n.id]; if(!grp) return;
+      const d=DIMS[n.layer]||DIMS.agent;
+      (FACES[n.layer]||[]).forEach(f=>{
+        if(f==='top') mkPort(grp,0,d.hh+0.5,0);
+        else if(f==='bottom') mkPort(grp,0,-(d.hh+0.5),0);
+        else if(f==='side') mkPort(grp,d.hw+0.55,0,0);
+      });
+    });
+    // add-port choice menu (agent / flow link)
+    const menu=document.createElement('div');
+    menu.style.cssText='position:absolute;z-index:40;display:none;min-width:158px;padding:5px;background:rgba(12,16,20,0.96);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(150,165,175,0.28);border-radius:7px;box-shadow:0 12px 34px rgba(0,0,0,0.55);pointer-events:auto;';
+    const mkItem=(svg,label)=>{
+      const it=document.createElement('div');
+      it.style.cssText='display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:4px;cursor:pointer;font:500 12px/1 IBM Plex Mono,monospace;letter-spacing:0.03em;color:#dfe8ee;transition:background .12s;';
+      it.innerHTML='<span style="width:15px;display:grid;place-items:center;">'+svg+'</span>'+label;
+      it.onmouseenter=()=>it.style.background='rgba(255,255,255,0.07)';
+      it.onmouseleave=()=>it.style.background='transparent';
+      return it;
+    };
+    const iAgent='<svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="#aeb9bf" stroke-width="1.3"><rect x="1.8" y="1.8" width="9.4" height="9.4"/></svg>';
+    const iFlow='<svg width="14" height="13" viewBox="0 0 14 13" fill="none" stroke="#aeb9bf" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 4 H10 M8 2 L11 4 L8 6"/><path d="M12.5 9 H4 M6 7 L3 9 L6 11"/></svg>';
+    const itA=mkItem(iAgent,'Add agent'), itF=mkItem(iFlow,'Add flow link');
+    menu.appendChild(itA); menu.appendChild(itF);
+    overlay.appendChild(menu);
+    this._menu=menu;
+    const closeMenu=()=>{ menu.style.display='none'; };
+    itA.onclick=(e)=>{ e.stopPropagation(); closeMenu(); };
+    itF.onclick=(e)=>{ e.stopPropagation(); closeMenu(); };
+    this._docClick=()=>closeMenu();
+    document.addEventListener('click', this._docClick);
+
+    // plane labels
+    this._planeLabels=[];
+    LAYERS.forEach(L=>{
+      const c=hex(L.color);
+      const el=document.createElement('div');
+      el.style.cssText='position:absolute;transform:translate(6px,-50%);pointer-events:none;transition:opacity .18s;white-space:nowrap;';
+      el.innerHTML='<div style="display:flex;align-items:center;gap:9px;"><span style="font:600 11px/1 IBM Plex Mono,monospace;color:'+c+';text-shadow:0 0 8px '+c+';">'+L.idx+'</span><span style="width:24px;height:1px;background:'+c+';box-shadow:0 0 6px '+c+';"></span><span style="font:700 12px/1 Space Grotesk,sans-serif;letter-spacing:0.2em;color:#e6eef3;">'+L.title+'</span></div>';
+      overlay.appendChild(el);
+      this._planeLabels.push({el, pos:new THREE.Vector3(HALF, L.y, HALF)});
+    });
+
+    // ---- refs + handlers ----
+    this._camera=camera; this._controls=controls; this._renderer=renderer;
+    this._home={pos:camera.position.clone(), tgt:controls.target.clone()};
+    this._fit=()=>{ camera.position.copy(this._home.pos); controls.target.copy(this._home.tgt); controls.update(); };
+    this._dolly=(f)=>{ const d=camera.position.clone().sub(controls.target); const nd=d.length()*f; d.setLength(Math.max(controls.minDistance,Math.min(controls.maxDistance,nd))); camera.position.copy(controls.target.clone().add(d)); controls.update(); };
+    this._top=false;
+    this._view2d=()=>{ this._top=!this._top; if(this._top){ camera.position.set(0.001,58,0.001); } else { camera.position.copy(this._home.pos); } controls.target.copy(this._home.tgt); controls.update(); };
+    this._syncProps=()=>{ if(this._controls) this._controls.autoRotate=!!this.props.autoOrbit; if(this._planesGroup) this._planesGroup.visible=this.props.showPlanes!==false; if(this._connGroup) this._connGroup.visible=this.props.showConnectors!==false; };
+    this._syncProps();
+
+    this._onResize=()=>{ camera.aspect=W()/H(); camera.updateProjectionMatrix(); renderer.setSize(W(),H()); };
+    window.addEventListener('resize', this._onResize);
+    if(window.ResizeObserver){ this._ro=new ResizeObserver(this._onResize); this._ro.observe(stage); }
+
+    const clock=new THREE.Clock();
+    const proj=(v)=>{ const p=v.clone().project(camera); return {x:(p.x*0.5+0.5)*W(), y:(-p.y*0.5+0.5)*H(), vis:p.z<1}; };
+    const animate=()=>{
+      this._raf=requestAnimationFrame(animate);
+      if(this.state.view!=='command') return;
+      const t=clock.getElapsedTime();
+      controls.update();
+      this._rings.forEach(r=>{ r.mesh.material.opacity=0.35+0.35*Math.sin(t*2.4+r.phase); });
+      if(this._human){ this._human.rotation.y=t*0.5; this._human.position.y=hy+Math.sin(t*1.2)*0.3; }
+      const _cx=camera.position.x,_cz=camera.position.z;
+      this._bill.forEach(b=>{ if(b.active) b.grp.position.y=b.baseY+Math.sin(t*1.7+b.phase)*0.32; b.grp.rotation.y=Math.atan2(_cx-b.grp.position.x,_cz-b.grp.position.z)+b.off; });
+      this._pulses.forEach(p=>{ const tt=(t*0.32+p.off)%1; p.mesh.position.lerpVectors(p.a,p.b,tt); });
+      this._ports.forEach(p=>{ const s=proj(new THREE.Vector3(p.grp.position.x+p.ox,p.grp.position.y+p.oy,p.grp.position.z+p.oz)); p.el.style.display=s.vis?'grid':'none'; p.el.style.left=s.x+'px'; p.el.style.top=s.y+'px'; });
+      this._labels.forEach(l=>{ const s=proj(l.pos); l.el.style.opacity=s.vis?'1':'0'; l.el.style.left=s.x+'px'; l.el.style.top=s.y+'px'; });
+      this._planeLabels.forEach(l=>{ const s=proj(l.pos); l.el.style.opacity=s.vis?'0.92':'0'; l.el.style.left=s.x+'px'; l.el.style.top=s.y+'px'; });
+      if(this._rulerDirty){ this._rulerRebuild(); this._rulerDirty=false; }
+      this._rulerLabels.forEach(l=>{ const s=proj(l.pos); l.el.style.opacity=s.vis?'1':'0'; l.el.style.left=s.x+'px'; l.el.style.top=(s.y+(l.dy||0))+'px'; });
+      if(this._rulerTitle){ const s=proj(this._rulerTitle.pos); this._rulerTitle.el.style.opacity=s.vis?'1':'0'; this._rulerTitle.el.style.left=s.x+'px'; this._rulerTitle.el.style.top=s.y+'px'; }
+      renderer.render(scene,camera);
+    };
+    animate();
+  }
+}
+</script>
+</body>
+</html>

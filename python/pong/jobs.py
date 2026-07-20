@@ -9,7 +9,7 @@ from typing import Any
 
 from . import events
 from .jsonutil import read_json, write_json
-from .paths import ensure_layout, jobs_dir, state_dir
+from .paths import ensure_layout, jobs_dir
 from .schema import (
     JOB_STATUSES,
     SchemaError,
@@ -143,10 +143,14 @@ def create_job(
     round_n: int = 1,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    state = load_session_state(session)
-    sess = state.get("session") or session
-    if not sess:
-        raise ValueError("no bound session — start a team or pass --session")
+    from .routing import resolve_write_session, write_session_last
+
+    # V1/V2: never fall back to active-pair; require session token for cross-team
+    sess = resolve_write_session(session)
+    state = load_session_state(sess)
+    if not state.get("session"):
+        state = dict(state)
+        state["session"] = sess
     if not (task or "").strip():
         raise ValueError("empty task")
     worker = resolve_worker(state, worker_key)
@@ -184,9 +188,8 @@ def create_job(
     prompt_path = session_artifact(state, f"{jid}.prompt.txt")
     prompt_path.write_text(prompt, encoding="utf-8")
     job["prompt_path"] = str(prompt_path)
-    sent = session_artifact(state, "last-sent.txt")
-    sent.write_text(prompt, encoding="utf-8")
-    (state_dir() / "last-sent.txt").write_text(prompt, encoding="utf-8")
+    # V6: per-session last-sent only — no global root mirror
+    write_session_last(str(sess), "last-sent", prompt)
     save_job(job)
     events.emit(
         "job.created",
@@ -201,10 +204,33 @@ def create_job(
     return job
 
 
+def _clear_ephemeral_for_job(session: str, job_id: str) -> None:
+    """Drop registry marks tied to a finished job so the 3D seat vanishes."""
+    try:
+        from . import subagents
+
+        subagents.unregister(session, job_id)
+        subagents.unregister(session, f"eph_{job_id}")
+    except Exception:
+        pass
+
+
 def set_status(session: str, job_id: str, status: str, **fields: Any) -> dict[str, Any]:
-    job = load_job(session, job_id)
+    from .routing import resolve_write_session
+
+    sess = resolve_write_session(session)
+    job = load_job(sess, job_id)
     if not job:
         raise FileNotFoundError(job_id)
+    if str(job.get("session") or sess) != sess:
+        from .routing import refuse
+
+        refuse(
+            f"set_status refused — job session {job.get('session')!r} ≠ write session {sess!r}",
+            reason="job_session_mismatch",
+            target=str(job.get("session")),
+            caller=sess,
+        )
     prev = str(job.get("status") or "queued")
     assert_transition(prev, status)
     job["status"] = status
@@ -217,9 +243,11 @@ def set_status(session: str, job_id: str, status: str, **fields: Any) -> dict[st
         if not str(k).startswith("_"):
             job[k] = v
     save_job(job)
+    if status in TERMINAL_STATUSES:
+        _clear_ephemeral_for_job(sess, job_id)
     events.emit(
         "job.status",
-        session=session,
+        session=sess,
         job_id=job_id,
         status=status,
         **{"from": prev},
@@ -235,10 +263,34 @@ def record_claim(
     commands: str | None = None,
     summary: str | None = None,
     raw: str | None = None,
+    claim_token: str | None = None,
 ) -> dict[str, Any]:
-    job = load_job(session, job_id)
+    import secrets
+
+    from .routing import (
+        assert_claim_session,
+        presented_token,
+        read_session_token,
+        resolve_write_session,
+        write_session_last,
+    )
+
+    # V2/V7: write gate + session-bound claim token
+    write_sess = resolve_write_session(session)
+    job = load_job(write_sess, job_id)
     if not job:
         raise FileNotFoundError(job_id)
+    job_sess = str(job.get("session") or write_sess)
+    if job_sess != write_sess:
+        from .routing import refuse
+
+        refuse(
+            f"claim refused — write session {write_sess!r} ≠ job session {job_sess!r}",
+            reason="claim_session_mismatch",
+            target=job_sess,
+            caller=write_sess,
+        )
+    assert_claim_session(job_sess, claim_token=claim_token)
     prev = str(job.get("status") or "queued")
     # claim implies done — allow from non-terminal via transition rules
     if prev not in TERMINAL_STATUSES or prev == "human_takeover":
@@ -248,33 +300,37 @@ def record_claim(
             # force path: if already done, just update claim
             if prev != "done":
                 raise
+    tok = claim_token or presented_token()
+    expected = read_session_token(job_sess)
     claim = {
         "files": files or [],
         "commands": commands or "",
         "summary": summary or "",
         "raw": raw or "",
         "at": time.time(),
+        "session": job_sess,
+        "token_ok": bool(
+            tok and expected and secrets.compare_digest(tok, expected)
+        ),
     }
     job["claim"] = claim
     job["status"] = "done"
     job["human_takeover"] = False
     save_job(job)
-    events.emit("job.claim", session=session, job_id=job_id, worker=job.get("worker"))
+    _clear_ephemeral_for_job(job_sess, job_id)
+    events.emit("job.claim", session=job_sess, job_id=job_id, worker=job.get("worker"))
     if prev != "done":
         events.emit(
             "job.status",
-            session=session,
+            session=job_sess,
             job_id=job_id,
             status="done",
             **{"from": prev},
         )
-    state = load_session_state(session)
     text = raw or summary or json_fallback(claim)
-    reply = session_artifact(state, "last-reply.txt")
-    reply.write_text(text + "\n", encoding="utf-8")
-    session_artifact(state, "last-claude.txt").write_text(text + "\n", encoding="utf-8")
-    (state_dir() / "last-claude.txt").write_text(text + "\n", encoding="utf-8")
-    (state_dir() / "last-reply.txt").write_text(text + "\n", encoding="utf-8")
+    # V6: per-session last-* only — no global root mirrors
+    write_session_last(job_sess, "last-reply", text)
+    write_session_last(job_sess, "last-claude", text)
     return job
 
 
@@ -298,6 +354,11 @@ def summarize_jobs(session: str, *, recent_n: int = 10) -> dict[str, Any]:
     all_j = list_jobs(session)
     open_j = [j for j in all_j if j.get("status") not in TERMINAL_STATUSES]
     recent = [j for j in all_j if j.get("status") in TERMINAL_STATUSES][:recent_n]
+    # Per-status tallies for Mission “Jobs by status” (design handoff)
+    by_status: dict[str, int] = {}
+    for j in all_j:
+        st = str(j.get("status") or "unknown")
+        by_status[st] = by_status.get(st, 0) + 1
     return {
         "open": [job_summary(j) for j in open_j],
         "recent": [job_summary(j) for j in recent],
@@ -306,5 +367,6 @@ def summarize_jobs(session: str, *, recent_n: int = 10) -> dict[str, Any]:
             "total": len(all_j),
             "done": sum(1 for j in all_j if j.get("status") == "done"),
             "failed": sum(1 for j in all_j if j.get("status") == "failed"),
+            "by_status": by_status,
         },
     }

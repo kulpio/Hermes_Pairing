@@ -77,8 +77,19 @@ def workers_ok(state: dict) -> bool:
     return bool(workers_from_state(state))
 
 
+def _route_err(e: BaseException) -> int:
+    from pong.routing import RouteRefused
+
+    if isinstance(e, RouteRefused):
+        print(f"error: {e}", file=sys.stderr)
+        return int(getattr(e, "exit_code", 2) or 2)
+    print(f"error: {e}", file=sys.stderr)
+    return 2
+
+
 def _cmd_job_create(args: argparse.Namespace) -> int:
     from pong.jobs import create_job
+    from pong.routing import RouteRefused
     from pong.transports.dispatch import dispatch_job, parse_transport_plan
 
     task = args.task
@@ -87,6 +98,15 @@ def _cmd_job_create(args: argparse.Namespace) -> int:
     if not task or not str(task).strip():
         print("error: empty task", file=sys.stderr)
         return 2
+    extra: dict = {}
+    parent = getattr(args, "parent", None)
+    if parent:
+        extra["parent_worker"] = parent
+        extra["ephemeral_seat"] = True
+        extra["kind"] = "subagent"
+    if getattr(args, "ephemeral", False):
+        extra["ephemeral_seat"] = True
+        extra["kind"] = extra.get("kind") or "subagent"
     try:
         job = create_job(
             session=args.session,
@@ -94,7 +114,10 @@ def _cmd_job_create(args: argparse.Namespace) -> int:
             task=task.strip(),
             require_claim=not args.no_claim,
             round_n=args.round,
+            extra=extra or None,
         )
+    except RouteRefused as e:
+        return _route_err(e)
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -111,14 +134,31 @@ def _cmd_job_create(args: argparse.Namespace) -> int:
     for r in results:
         flag = "ok" if r.ok else "FAIL"
         print(f"  transport[{flag}] {r.name}: {r.detail}")
-    return 0 if job["status"] in ("queued", "notified", "done") else 1
+    # Success: notified/done, or job-file-only plan that intentionally stays queued.
+    # Failure: paste/headless was attempted and every notify transport failed — do not
+    # exit 0 while the conductor believes the worker was pinged (audit SEV-0).
+    st = str(job.get("status") or "")
+    if st in ("notified", "done"):
+        return 0
+    notify_results = [r for r in results if r.name != "job_file"]
+    if not notify_results:
+        # job-file only (--no-paste or transport_default=job)
+        return 0 if st == "queued" else 1
+    if any(r.ok for r in notify_results):
+        return 0
+    print(
+        "error: job file written but no notify transport succeeded "
+        f"(status={st}, error={job.get('error')!r})",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _cmd_job_list(args: argparse.Namespace) -> int:
     from pong.jobs import list_jobs
-    from pong.state import detect_bound_session
+    from pong.routing import resolve_read_session
 
-    sess = detect_bound_session(args.session)
+    sess = resolve_read_session(args.session)
     if not sess:
         print("error: no session", file=sys.stderr)
         return 2
@@ -132,9 +172,9 @@ def _cmd_job_list(args: argparse.Namespace) -> int:
 
 def _cmd_job_show(args: argparse.Namespace) -> int:
     from pong.jobs import load_job
-    from pong.state import detect_bound_session
+    from pong.routing import resolve_read_session
 
-    sess = detect_bound_session(args.session)
+    sess = resolve_read_session(args.session)
     if not sess:
         print("error: no session", file=sys.stderr)
         return 2
@@ -148,14 +188,13 @@ def _cmd_job_show(args: argparse.Namespace) -> int:
 
 def _cmd_job_status(args: argparse.Namespace) -> int:
     from pong.jobs import set_status
-    from pong.state import detect_bound_session
+    from pong.routing import RouteRefused, resolve_write_session
 
-    sess = detect_bound_session(args.session)
-    if not sess:
-        print("error: no session", file=sys.stderr)
-        return 2
     try:
+        sess = resolve_write_session(args.session)
         j = set_status(sess, args.job_id, args.status)
+    except RouteRefused as e:
+        return _route_err(e)
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -165,14 +204,11 @@ def _cmd_job_status(args: argparse.Namespace) -> int:
 
 def _cmd_job_claim(args: argparse.Namespace) -> int:
     from pong.jobs import record_claim
-    from pong.state import detect_bound_session
+    from pong.routing import RouteRefused, resolve_write_session
 
-    sess = detect_bound_session(args.session)
-    if not sess:
-        print("error: no session", file=sys.stderr)
-        return 2
     files = [x.strip() for x in (args.files or "").split(",") if x.strip()]
     try:
+        sess = resolve_write_session(args.session)
         j = record_claim(
             sess,
             args.job_id,
@@ -181,10 +217,90 @@ def _cmd_job_claim(args: argparse.Namespace) -> int:
             summary=args.summary or "",
             raw=args.raw,
         )
+    except RouteRefused as e:
+        return _route_err(e)
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     print(f"claimed {j['id']} status={j['status']}")
+    return 0
+
+
+def _cmd_brief_send(args: argparse.Namespace) -> int:
+    """Sole legitimate inter-team channel — file drop, never auto-pasted."""
+    from pong.routing import RouteRefused, brief_send, resolve_write_session
+
+    body = " ".join(args.body or []).strip()
+    if args.file:
+        body = Path(args.file).read_text(encoding="utf-8")
+    if not body.strip():
+        print("error: empty brief body", file=sys.stderr)
+        return 2
+    if not args.to:
+        print("error: --to <session> required", file=sys.stderr)
+        return 2
+    try:
+        src = resolve_write_session(args.session)
+        path = brief_send(
+            source_session=src,
+            to_session=args.to.strip(),
+            body=body,
+            subject=args.subject,
+        )
+    except RouteRefused as e:
+        return _route_err(e)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(f"brief_sent path={path}")
+    print("note: file-based only — target team must pull; never auto-pasted")
+    return 0
+
+
+def _cmd_pane_register(args: argparse.Namespace) -> int:
+    from pong.routing import (
+        RouteRefused,
+        exact_window_title,
+        register_worker_pane,
+        resolve_write_session,
+    )
+
+    try:
+        sess = resolve_write_session(args.session)
+        if not args.worker or not args.pane_id:
+            print("error: --worker and --pane-id required", file=sys.stderr)
+            return 2
+        title = args.title or exact_window_title(sess, args.worker)
+        path = register_worker_pane(
+            sess,
+            args.worker,
+            pane_id=args.pane_id,
+            start_command=args.cmd or "",
+            title=title,
+        )
+    except RouteRefused as e:
+        return _route_err(e)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(f"pane_registered session={sess} worker={args.worker} pane_id={args.pane_id}")
+    print(f"path={path}")
+    return 0
+
+
+def _cmd_token_ensure(args: argparse.Namespace) -> int:
+    """Create/show session token (spawn-time / local admin)."""
+    from pong.routing import ensure_session_token, resolve_read_session
+
+    sess = resolve_read_session(args.session)
+    if not sess:
+        print("error: no session", file=sys.stderr)
+        return 2
+    tok = ensure_session_token(sess)
+    if args.print_token:
+        print(tok)
+    else:
+        print(f"session={sess} token_set=yes (use PONG_TOKEN; file chmod 600)")
     return 0
 
 
@@ -230,6 +346,52 @@ def _cmd_delegate(args: argparse.Namespace) -> int:
         ns.task = ns.task + "\n\n" + body
         ns.file = None
     return _cmd_job_create(ns)
+
+
+def _cmd_subagent(args: argparse.Namespace) -> int:
+    from pong.routing import RouteRefused, resolve_read_session, resolve_write_session
+    from pong import subagents
+
+    cmd = args.subagent_cmd
+    try:
+        if cmd == "list":
+            sess = resolve_read_session(args.session)
+            if not sess:
+                print("error: no session", file=sys.stderr)
+                return 2
+            for r in subagents.load_registry(sess):
+                print(
+                    f"{r.get('id')}\tparent={r.get('parent_id')}\t"
+                    f"{r.get('label')}\t{(r.get('task') or '')[:50]}"
+                )
+            return 0
+        sess = resolve_write_session(args.session)
+        if cmd == "up":
+            row = subagents.register(
+                sess,
+                parent_id=args.parent,
+                label=args.label or args.task or "Subagent",
+                task=args.task or args.label or "",
+                sub_id=args.id,
+                mission_role=args.role or "coder",
+            )
+            print(f"subagent_id={row['id']}")
+            print(f"session={sess} parent={row['parent_id']} label={row['label']}")
+            print("# appears on 3D SUB layer until: pong subagent down", row["id"])
+            return 0
+        if cmd == "down":
+            ok = subagents.unregister(sess, args.id)
+            if not ok:
+                print(f"error: not found: {args.id}", file=sys.stderr)
+                return 2
+            print(f"removed {args.id}")
+            return 0
+    except RouteRefused as e:
+        return _route_err(e)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    return 2
 
 
 def _cmd_ledger(args: argparse.Namespace) -> int:
@@ -367,6 +529,16 @@ def build_parser() -> argparse.ArgumentParser:
     jc.add_argument("--paste-only", action="store_true")
     jc.add_argument("--no-claim", action="store_true")
     jc.add_argument("--round", type=int, default=1)
+    jc.add_argument(
+        "--parent",
+        default=None,
+        help="parent seat id (w1/c1) — shows as ephemeral subagent on 3D map until done",
+    )
+    jc.add_argument(
+        "--ephemeral",
+        action="store_true",
+        help="mark job as ephemeral subagent seat on the map",
+    )
     jc.set_defaults(func=_cmd_job_create)
 
     jl = jsub.add_parser("list")
@@ -413,6 +585,25 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--criteria", default=None)
     d.set_defaults(func=_cmd_delegate)
 
+    # Ephemeral subagents (3D map live nodes that vanish when done)
+    sa = sub.add_parser(
+        "subagent",
+        help="ephemeral subagents on the 3D map (appear while active, vanish when down)",
+    )
+    sasub = sa.add_subparsers(dest="subagent_cmd", required=True)
+    sau = sasub.add_parser("up", help="register a live subagent under a parent seat")
+    sau.add_argument("--parent", "-p", required=True, help="parent seat id (w1, c1, …)")
+    sau.add_argument("--label", "-l", default="", help="short name on the map")
+    sau.add_argument("--task", "-t", default="", help="what this sub is doing")
+    sau.add_argument("--id", default=None, help="stable id (default: eph_xxxxxxxx)")
+    sau.add_argument("--role", default="coder", help="mission role glyph")
+    sau.set_defaults(func=_cmd_subagent)
+    sad = sasub.add_parser("down", help="remove a subagent from the map")
+    sad.add_argument("id", help="subagent id from `pong subagent up`")
+    sad.set_defaults(func=_cmd_subagent)
+    sal = sasub.add_parser("list", help="list live ephemeral subagents")
+    sal.set_defaults(func=_cmd_subagent)
+
     led = sub.add_parser("ledger")
     lsub = led.add_subparsers(dest="ledger_cmd", required=True)
     lr = lsub.add_parser("record")
@@ -430,6 +621,36 @@ def build_parser() -> argparse.ArgumentParser:
     m = sub.add_parser("migrate", help="copy ~/.hermes-pong → ~/.pong")
     m.add_argument("--force", action="store_true")
     m.set_defaults(func=_cmd_migrate)
+
+    # Inter-team channel (file-based, never auto-pasted)
+    br = sub.add_parser("brief", help="inter-team briefs (file channel only)")
+    brsub = br.add_subparsers(dest="brief_cmd", required=True)
+    brs = brsub.add_parser("send", help="send brief to another team inbox")
+    brs.add_argument("--to", required=True, help="target team session")
+    brs.add_argument("--subject", default=None)
+    brs.add_argument("--file", "-f", default=None, help="body from file")
+    brs.add_argument("body", nargs="*", help="brief body text")
+    brs.set_defaults(func=_cmd_brief_send)
+
+    # Pane pin registration (V3)
+    pn = sub.add_parser("pane", help="worker pane registration")
+    pnsub = pn.add_subparsers(dest="pane_cmd", required=True)
+    pnr = pnsub.add_parser("register", help="pin worker to immutable tmux pane id")
+    pnr.add_argument("--worker", "-w", required=True)
+    pnr.add_argument("--pane-id", required=True, help="tmux pane id e.g. %%3")
+    pnr.add_argument("--cmd", default="", help="expected start command")
+    pnr.add_argument("--title", default=None, help="exact title pong.<session>.<seat>")
+    pnr.set_defaults(func=_cmd_pane_register)
+
+    tok = sub.add_parser("token", help="session isolation token")
+    toksub = tok.add_subparsers(dest="token_cmd", required=True)
+    te = toksub.add_parser("ensure", help="create token file if missing")
+    te.add_argument(
+        "--print-token",
+        action="store_true",
+        help="print raw token (for spawn env export)",
+    )
+    te.set_defaults(func=_cmd_token_ensure)
 
     return p
 

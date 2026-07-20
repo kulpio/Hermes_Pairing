@@ -121,6 +121,64 @@ enum Pong {
     }
 }
 
+// MARK: - Cross-team isolation helpers (Addendum 2)
+
+enum Isolation {
+    /// PYTHONPATH root that contains the `pong` package.
+    /// Prefer installed control plane (`~/.pong/lib`); never the stale `~/src/Agent-Pong` tree.
+    static var pythonPath: String {
+        let home = NSHomeDirectory()
+        let candidates = [
+            home + "/.pong/lib",
+            // Dev checkouts (HermesPong is the canonical tree)
+            home + "/Personal/Projects/HermesPong/python",
+            Bundle.main.resourcePath.map { $0 + "/python" } ?? "",
+        ]
+        for c in candidates where !c.isEmpty {
+            if FileManager.default.fileExists(atPath: c + "/pong")
+                || FileManager.default.fileExists(atPath: c + "/pong/__init__.py") {
+                return c
+            }
+        }
+        return home + "/.pong/lib"
+    }
+
+    /// Create/read per-session token; returns token string (empty on failure).
+    static func ensureToken(session: String) -> String {
+        let safe = session.replacingOccurrences(of: "'", with: "")
+        let py = "import sys; sys.path.insert(0, '\(pythonPath)'); from pong.routing import ensure_session_token; print(ensure_session_token('\(safe)'), end='')"
+        let out = Pong.sh("python3 -c \(shellQuote(py))")
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Register immutable tmux pane id for a seat; returns pane_id.
+    @discardableResult
+    static func registerPane(session: String, workerId: String, tmuxTarget: String, startCommand: String) -> String {
+        let paneId = Pong.sh("tmux display-message -p -t \(tmuxTarget) '#{pane_id}' 2>/dev/null")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !paneId.isEmpty else {
+            Pong.log("isolation pane register miss target=\(tmuxTarget)")
+            return ""
+        }
+        let title = TerminalTheme.exactSeatTitle(pair: session, seat: workerId)
+        let safeSess = session.replacingOccurrences(of: "'", with: "")
+        let safeW = workerId.replacingOccurrences(of: "'", with: "")
+        let safePane = paneId.replacingOccurrences(of: "'", with: "")
+        let safeTitle = title.replacingOccurrences(of: "'", with: "")
+        let safeCmd = startCommand.replacingOccurrences(of: "'", with: "")
+        let py = "import sys; sys.path.insert(0, '\(pythonPath)'); from pong.routing import register_worker_pane; register_worker_pane('\(safeSess)', '\(safeW)', pane_id='\(safePane)', start_command='\(safeCmd)', title='\(safeTitle)')"
+        _ = Pong.sh("python3 -c \(shellQuote(py))")
+        // Also pin pane title in tmux
+        _ = Pong.sh("tmux select-pane -t \(tmuxTarget) -T '\(safeTitle)' 2>/dev/null || true")
+        Pong.log("isolation pane register session=\(session) seat=\(workerId) pane=\(paneId)")
+        return paneId
+    }
+
+    private static func shellQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
 // MARK: - Pair state (contracts identical to the Python panel)
 
 enum PairState {
@@ -140,13 +198,47 @@ enum PairState {
 
     static func loadPairsDb() -> [String: Any] { Pong.loadJSON(pairsPath) }
 
-    /// Live tmux pair sessions ∪ saved pairs.json entries (window-mode links).
+    /// Cached live pair names — never shell `tmux` on the main-thread hot path (beachball).
+    private static var pairsCache: [String] = []
+    private static var pairsCacheAt: TimeInterval = 0
+    private static var pairsRefreshInFlight = false
+
+    /// Live tmux pair sessions ∪ saved pairs.json (file first, async tmux refresh).
     static func listPairs() -> [String] {
-        let out = Pong.sh("tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
-        var names = Set(out.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && isPairName($0) })
-        for key in loadPairsDb().keys where isPairName(key) { names.insert(key) }
+        let now = Date().timeIntervalSince1970
+        // Always merge pairs.json keys (cheap file read) for count/popup stability
+        var names = Set(loadPairsDb().keys.filter { isPairName($0) })
+        if !pairsCache.isEmpty {
+            names.formUnion(pairsCache)
+        }
+        // Refresh tmux list off main if cache is stale
+        if now - pairsCacheAt > 4.0 || pairsCache.isEmpty {
+            refreshPairsCacheAsync()
+        }
+        if names.isEmpty, !pairsCache.isEmpty { return pairsCache.sorted() }
         return names.sorted()
+    }
+
+    /// Count for status chip — file only, no subprocess.
+    static func pairCountFromDb() -> Int {
+        loadPairsDb().keys.filter { isPairName($0) }.count
+    }
+
+    private static func refreshPairsCacheAsync() {
+        guard !pairsRefreshInFlight else { return }
+        pairsRefreshInFlight = true
+        DispatchQueue.global(qos: .utility).async {
+            let out = Pong.sh("tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
+            var names = Set(out.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && isPairName($0) })
+            for key in loadPairsDb().keys where isPairName(key) { names.insert(key) }
+            let sorted = names.sorted()
+            DispatchQueue.main.async {
+                pairsCache = sorted
+                pairsCacheAt = Date().timeIntervalSince1970
+                pairsRefreshInFlight = false
+            }
+        }
     }
 
     static func nextPairName() -> String {
@@ -294,8 +386,9 @@ enum PairState {
         }
         Pong.log("saved pair state \(session) conductor=\(cond["type"] ?? "?") \(entry)")
         // Refresh bind card for conductor skills
+        // Control plane lives at ~/.pong/lib (setup.sh); ~/bin/hermes_pong.py is the install shim.
         Pong.sh("python3 \"$HOME/bin/hermes_pong.py\" write-bind --session \(session) >/dev/null 2>&1 || "
-            + "python3 \"$HOME/src/Agent-Pong/scripts/hermes_pong.py\" write-bind --session \(session) >/dev/null 2>&1 || true")
+            + "PYTHONPATH=\"$HOME/.pong/lib${PYTHONPATH:+:$PYTHONPATH}\" python3 -m pong.cli status -s \(session) >/dev/null 2>&1 || true")
     }
 
 }
@@ -347,9 +440,10 @@ struct ConductorType: Equatable {
     }
 }
 
-// MARK: - Worker types (Phase 1: one worker per Hermes; army comes later)
+// MARK: - Worker types (agent seats — same CLIs as conductors where useful)
 
 /// Built-in worker seeds. User signs into each CLI themselves; we only launch the cmd.
+/// Hermes is valid as an **agent** too (not only orchestrator).
 struct WorkerType: Equatable {
     let id: String
     let label: String
@@ -358,6 +452,7 @@ struct WorkerType: Equatable {
 
     static let all: [WorkerType] = [
         WorkerType(id: "claude", label: "Claude Code", cmd: "claude", tmuxWindowName: "Worker"),
+        WorkerType(id: "hermes", label: "Hermes Agent", cmd: "hermes chat", tmuxWindowName: "Worker"),
         WorkerType(id: "kimi", label: "Kimi", cmd: "kimi", tmuxWindowName: "Worker"),
         // "Grok Build" = SuperGrok / Premium+ coding CLI on the user's own
         // Grok login and weekly pool. Same id/cmd for bridge + state compat.
@@ -466,8 +561,9 @@ enum Workers {
     }
 
     /// Launch a new worker CLI into an existing team (new tmux window + Terminal).
+    /// `parentId` when set marks a subagent under that worker (3D SUB layer).
     @discardableResult
-    static func addWorker(pair: String, type: WorkerType) -> String? {
+    static func addWorker(pair: String, type: WorkerType, parentId: String? = nil) -> String? {
         var db = PairState.loadPairsDb()
         var entry = db[pair] as? [String: Any] ?? [:]
         var ws = list(from: entry)
@@ -485,46 +581,53 @@ enum Workers {
         let launch = cmd.isEmpty ? "claude" : cmd
         let pathExport = "export PATH=/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.local/bin:$PATH"
         let safeCmd = launch.replacingOccurrences(of: "'", with: "'\\''")
+        let sessionToken = Isolation.ensureToken(session: pair)
+        let tokenExport = sessionToken.isEmpty ? "" : " export PONG_TOKEN=\(sessionToken);"
+        let seatExact = TerminalTheme.exactSeatTitle(pair: pair, seat: id)
 
         // Ensure base tmux session exists
         Pong.sh("tmux has-session -t \(pair) 2>/dev/null || tmux new-session -d -s \(pair) -n Conductor")
-        let winName = "W\(n)"
-        Pong.sh("tmux new-window -t \(pair) -n \(winName)")
+        TmuxScroll.apply(session: pair)
+        Pong.sh("tmux new-window -t \(pair) -n '\(seatExact.replacingOccurrences(of: "'", with: ""))'")
         // attach window index: use last window
         let idxOut = Pong.sh("tmux display-message -p -t \(pair) '#{window_index}' 2>/dev/null || echo \(tmuxIndex)")
         let actualIdx = Int(idxOut.trimmingCharacters(in: .whitespacesAndNewlines)) ?? tmuxIndex
-        Pong.sh("tmux send-keys -t \(pair):\(actualIdx) -l '\(pathExport); export PONG_SESSION=\(pair) HERMES_PONG_SESSION=\(pair); printf \"\\n  WORKER · \(type.label) · \(pair):\(actualIdx)\\n\\n\"; \(safeCmd)'")
+        let roleTag = parentId != nil ? "SUBAGENT" : "WORKER"
+        Pong.sh("tmux send-keys -t \(pair):\(actualIdx) -l '\(pathExport); export PONG_SESSION=\(pair) HERMES_PONG_SESSION=\(pair) PONG_SEAT=\(id);\(tokenExport) printf \"\\n  \(roleTag) · \(type.label) · \(pair):\(actualIdx)\\n\\n\"; \(safeCmd)'")
         usleep(80_000)
         Pong.sh("tmux send-keys -t \(pair):\(actualIdx) Enter")
+        TerminalTheme.tmuxTitle(baseSession: pair, tmuxIndex: actualIdx, displayTitle: seatExact)
+        let paneId = Isolation.registerPane(session: pair, workerId: id, tmuxTarget: "\(pair):\(actualIdx)", startCommand: launch)
 
-        // Open Terminal attached to this window view
+        // Open Terminal attached to this window view (dedicated window — not a tab on Grok)
         let view = "\(pair)-w\(actualIdx - 1)"
         Pong.sh("tmux has-session -t \(view) 2>/dev/null || tmux new-session -d -s \(view) -t \(pair)")
         Pong.sh("tmux select-window -t \(view):\(actualIdx) 2>/dev/null || tmux select-window -t \(pair):\(actualIdx)")
-        let before = Set(TerminalTheme.listWindows().map(\.id))
-        _ = Pong.osascript("""
-        tell application "Terminal"
-          do script "\(pathExport); exec tmux attach-session -t \(view)"
-          delay 0.6
-        end tell
-        """)
-        usleep(300_000)
-        let after = TerminalTheme.listWindows()
-        let newId = after.first(where: { !before.contains($0.id) })?.id
-            ?? after.last(where: { $0.title.contains(view) || $0.title.contains(pair) })?.id
+        let newId = Pairing.openAttachSession(view)
 
         let rec = makeWorker(
             id: id,
             type: type.id,
-            label: type.label,
+            label: parentId != nil ? "\(type.label) sub" : type.label,
             windowId: newId ?? "",
             mode: "tmux",
             cmd: launch,
             tmuxIndex: actualIdx
         )
         var recMut = rec
-        if newId == nil { recMut["window_id"] = NSNull() }
-        else { recMut["window_id"] = newId! }
+        // Never force-unwrap newId — Automation denial / openAttachSession miss must not crash.
+        if let wid = newId, !wid.isEmpty {
+            recMut["window_id"] = wid
+        } else {
+            recMut["window_id"] = NSNull()
+            Pong.log("addWorker: no Terminal window id for \(pair)/\(id) (attach failed or permission denied)")
+        }
+        if !paneId.isEmpty {
+            recMut["pane_id"] = paneId
+        } else {
+            Pong.log("addWorker: no tmux pane id for \(pair)/\(id) — isolation paste may refuse until re-register")
+        }
+        if let parentId { recMut["parent_id"] = parentId }
         ws.append(recMut)
         entry["workers"] = ws
         entry["updated"] = Date().timeIntervalSince1970
@@ -534,6 +637,13 @@ enum Workers {
         }
         db[pair] = entry
         Pong.writeJSON(PairState.pairsPath, db)
+        // Topology: orch→worker or parent→sub so 3D lines + SUB deck stay in sync
+        if let parentId {
+            FlowGraph.addEdge(pair: pair, from: parentId, to: id, kind: "sub")
+        } else {
+            let condId = ((entry["conductor"] as? [String: Any])?["id"] as? String) ?? "c1"
+            FlowGraph.addEdge(pair: pair, from: condId, to: id, kind: "delegate")
+        }
         var active = Pong.loadJSON(PairState.activePath)
         if active["session"] as? String == pair || active["session"] == nil {
             active = entry
@@ -605,6 +715,28 @@ enum Workers {
         syncActive(pair, entry: entry)
         TerminalTheme.applyPair(pair)
         Pong.log("rename worker \(pair)/\(workerId) → \(trimmed)")
+    }
+
+    /// Rename conductor seat label (map / Focus display name).
+    static func setConductorLabel(pair: String, label: String) {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        var cond = entry["conductor"] as? [String: Any] ?? [:]
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        cond["label"] = trimmed
+        entry["conductor"] = cond
+        entry["updated"] = Date().timeIntervalSince1970
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        var active = Pong.loadJSON(PairState.activePath)
+        if active["session"] as? String == pair {
+            active["conductor"] = cond
+            active["updated"] = Date().timeIntervalSince1970
+            Pong.writeJSON(PairState.activePath, active)
+        }
+        TerminalTheme.applyPair(pair)
+        Pong.log("rename conductor \(pair) → \(trimmed)")
     }
 
     static func setWorkerColors(pair: String, workerId: String, colors: TerminalTheme.Colors) {
@@ -704,29 +836,145 @@ enum Workers {
         }
     }
 
+    /// Raise this worker’s Terminal, or re-open a new one attached to the same
+    /// tmux view (history intact). Closing the Terminal window only detaches the
+    /// client — it does not kill the agent or clear scrollback.
     static func frontWorker(pair: String, workerId: String) {
-        let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
-        let ws = list(from: entry)
-        guard let w = ws.first(where: { ($0["id"] as? String) == workerId }) else { return }
-        let wid = "\(w["window_id"] ?? "")"
-        if Int(wid) != nil {
-            TerminalTheme.applyPair(pair)
-            Pairing.flashPairWindows(wid, nil)
-            return
+        Pong.log("frontWorker begin \(pair)/\(workerId)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Drop free Grok/Claude window ids that were mis-bound earlier
+            scrubInvalidWindowIds(pair: pair)
+            let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
+            let ws = list(from: entry)
+            guard let w = ws.first(where: { ($0["id"] as? String) == workerId }) else {
+                Pong.log("frontWorker miss \(pair)/\(workerId) workers=\(ws.map { $0["id"] as? String ?? "?" })")
+                return
+            }
+            let ti = (w["tmux_index"] as? Int) ?? 1
+            let view = TerminalTheme.viewToken(pair: pair, role: workerId)
+            // Ignore stored id unless it is a real attach for THIS view
+            let stored = "\(w["window_id"] ?? "")"
+            let storedOpt: String? = {
+                guard Int(stored) != nil else { return nil }
+                let title = TerminalTheme.listWindows().first(where: { $0.id == stored })?.title ?? ""
+                if TerminalTheme.isPairAttachTitle(title, viewToken: view) { return stored }
+                Pong.log("frontWorker ignore bad stored id=\(stored) title=\(title)")
+                return nil
+            }()
+            Pong.log("frontWorker resolve pair=\(pair) id=\(workerId) view=\(view) tmux=\(ti) stored=\(storedOpt ?? "-")")
+            guard let live = Pairing.frontOrReopenAttach(
+                pair: pair, view: view, tmuxIndex: ti, storedWindowId: storedOpt
+            ) else {
+                Pong.log("frontWorker reopen failed \(pair)/\(workerId) view=\(view)")
+                return
+            }
+            // Final gate: never raise a free Grok/Claude window
+            guard Pairing.raiseOnlyIfPairAttach(live, viewToken: view) else {
+                Pong.log("frontWorker refused raise id=\(live) — not pair attach for \(view)")
+                // Clear poison id and try a forced reopen once
+                setWorkerWindowId(pair: pair, workerId: workerId, windowId: "")
+                if let again = Pairing.openAttachSession(view),
+                   Pairing.raiseOnlyIfPairAttach(again, viewToken: view) {
+                    setWorkerWindowId(pair: pair, workerId: workerId, windowId: again)
+                    TerminalTheme.apply(windowId: again,
+                        displayTitle: (w["label"] as? String) ?? workerId,
+                        viewToken: view,
+                        colors: TerminalTheme.Colors.from(w["colors"]),
+                        profile: TerminalTheme.profileName(pair: pair, role: workerId))
+                    Pong.log("frontWorker ok after retry \(pair)/\(workerId) → \(again)")
+                }
+                return
+            }
+            setWorkerWindowId(pair: pair, workerId: workerId, windowId: live)
+            // Theme ONLY this seat’s window — never applyPair (touches other windows)
+            TerminalTheme.apply(windowId: live,
+                displayTitle: (w["label"] as? String) ?? workerId,
+                viewToken: view,
+                colors: TerminalTheme.Colors.from(w["colors"]),
+                profile: TerminalTheme.profileName(pair: pair, role: workerId))
+            Pong.log("frontWorker ok \(pair)/\(workerId) → window \(live)")
         }
-        // fallback: attach view
-        if let ti = w["tmux_index"] as? Int {
-            let view = "\(pair)-w\(ti - 1)"
-            Pong.sh("tmux has-session -t \(view) 2>/dev/null && open -a Terminal && tmux attach -t \(view) || true")
-            Pong.osascript("""
-            tell application "Terminal"
-              activate
-              try
-                do script "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; tmux attach-session -t \(view)"
-              end try
-            end tell
-            """)
+    }
+
+    /// Clear window_ids that point at free Grok/Claude UIs or dead ids.
+    static func scrubInvalidWindowIds(pair: String) {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        var changed = false
+        var ws = list(from: entry)
+        let wins = TerminalTheme.listWindows()
+        for i in ws.indices {
+            let id = (ws[i]["id"] as? String) ?? "w\(i+1)"
+            let wid = "\(ws[i]["window_id"] ?? "")"
+            guard Int(wid) != nil else { continue }
+            let token = TerminalTheme.viewToken(pair: pair, role: id)
+            let title = wins.first(where: { $0.id == wid })?.title ?? ""
+            if title.isEmpty || !TerminalTheme.isPairAttachTitle(title, viewToken: token) {
+                Pong.log("scrub window_id pair=\(pair) seat=\(id) was=\(wid) title=\(title)")
+                ws[i]["window_id"] = NSNull()
+                changed = true
+            }
         }
+        var cond = entry["conductor"] as? [String: Any] ?? [:]
+        let hWid = "\(entry["hermes_window_id"] ?? cond["window_id"] ?? "")"
+        if Int(hWid) != nil {
+            let hTok = TerminalTheme.viewToken(pair: pair, role: "hermes")
+            let title = wins.first(where: { $0.id == hWid })?.title ?? ""
+            if title.isEmpty || !TerminalTheme.isPairAttachTitle(title, viewToken: hTok) {
+                Pong.log("scrub hermes_window_id pair=\(pair) was=\(hWid) title=\(title)")
+                entry["hermes_window_id"] = NSNull()
+                entry["conductor_window_id"] = NSNull()
+                cond["window_id"] = NSNull()
+                entry["conductor"] = cond
+                changed = true
+            }
+        }
+        if changed {
+            entry["workers"] = ws
+            if let first = ws.first {
+                entry["claude_window_id"] = first["window_id"] ?? NSNull()
+                entry["worker_window_id"] = first["window_id"] ?? NSNull()
+            }
+            entry["updated"] = Date().timeIntervalSince1970
+            db[pair] = entry
+            Pong.writeJSON(PairState.pairsPath, db)
+            syncActive(pair, entry: entry)
+        }
+    }
+
+    static func setWorkerWindowId(pair: String, workerId: String, windowId: String) {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        var ws = list(from: entry)
+        guard let idx = ws.firstIndex(where: { ($0["id"] as? String) == workerId }) else { return }
+        if windowId.isEmpty {
+            ws[idx]["window_id"] = NSNull()
+        } else {
+            ws[idx]["window_id"] = windowId
+        }
+        entry["workers"] = ws
+        if idx == 0 {
+            entry["claude_window_id"] = windowId.isEmpty ? NSNull() : windowId
+            entry["worker_window_id"] = windowId.isEmpty ? NSNull() : windowId
+        }
+        entry["updated"] = Date().timeIntervalSince1970
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        syncActive(pair, entry: entry)
+    }
+
+    static func setConductorWindowId(pair: String, windowId: String) {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        entry["hermes_window_id"] = windowId
+        entry["conductor_window_id"] = windowId
+        var cond = entry["conductor"] as? [String: Any] ?? [:]
+        cond["window_id"] = windowId
+        entry["conductor"] = cond
+        entry["updated"] = Date().timeIntervalSince1970
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        syncActive(pair, entry: entry)
     }
 }
 
@@ -812,7 +1060,9 @@ enum TerminalTheme {
     }
 
     static func listWindows() -> [(id: String, title: String)] {
-        let out = Pong.appleScript("""
+        // Prefer osascript (reliable off main thread); NSAppleScript often returns empty
+        // from background queues which broke “reopen closed Terminal”.
+        let out = Pong.osascript("""
         tell application "Terminal"
           set acc to ""
           repeat with w in windows
@@ -833,26 +1083,69 @@ enum TerminalTheme {
         return rows
     }
 
-    /// Strict: only windows whose title contains "attach-session -t <token>".
-    /// Never match agent chat (hermes ▸) or bare "hermes".
-    static func resolvePairWindow(stored: String?, viewToken: String) -> String? {
+    /// Exact recovery token `pong.<session>.<seat>` — no fuzzy Claude title match (V5).
+    static func exactSeatTitle(pair: String, seat: String) -> String {
+        "pong.\(pair).\(seat)"
+    }
+
+    /// True when title is exactly the isolation token (or equals it as custom title).
+    static func isExactSeatTitle(_ title: String, pair: String, seat: String) -> Bool {
+        let want = exactSeatTitle(pair: pair, seat: seat)
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t == want { return true }
+        // Terminal may prefix path or other chrome — require whole-token boundary match
+        if t.contains(want) {
+            // reject fuzzy agent titles that merely mention session name
+            if t.localizedCaseInsensitiveContains("claude code") && !t.contains("pong.") {
+                return false
+            }
+            return true
+        }
+        return false
+    }
+
+    /// True only for a real pair attach client — never a free-floating Grok/Claude TUI.
+    static func isPairAttachTitle(_ title: String, viewToken: String) -> Bool {
+        let t = title.lowercased()
+        let token = viewToken.lowercased()
+        // Free agent GUIs (not our tmux clients) — never rebind by fuzzy Claude titles
+        if t.contains("grok ▸") { return false }
+        if t.contains("hermes ▸") { return false }
+        if t.contains("osascript") { return false }
+        if t.contains("claude code") && !t.contains("attach-session -t") && !t.contains("pong.") {
+            return false
+        }
+        // Must be an attach to THIS view session (exact token after -t)
+        let needle = "attach-session -t \(token)"
+        guard t.contains(needle) else { return false }
+        // Avoid prefix collisions (e.g. pair-w1 matching pair-w10)
+        if let r = t.range(of: needle) {
+            let after = t[r.upperBound...]
+            if let c = after.first, c.isLetter || c.isNumber || c == "-" || c == "_" {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Strict recovery: exact `pong.<session>.<seat>` title OR attach-session -t <viewToken>.
+    /// Never fuzzy-match free Grok/Claude windows (V5).
+    static func resolvePairWindow(stored: String?, viewToken: String, pair: String? = nil, seat: String? = nil) -> String? {
         let wins = listWindows()
-        let needle = "attach-session -t \(viewToken)".lowercased()
-        func isPairPane(_ title: String) -> Bool {
-            let t = title.lowercased()
-            if t.contains("hermes ▸") { return false }
-            if t.contains("osascript") { return false }
-            return t.contains(needle)
+        func matches(_ title: String) -> Bool {
+            if isPairAttachTitle(title, viewToken: viewToken) { return true }
+            if let pair, let seat, isExactSeatTitle(title, pair: pair, seat: seat) { return true }
+            return false
         }
         if let s = stored, Int(s) != nil {
-            if let title = wins.first(where: { $0.id == s })?.title, isPairPane(title) {
+            if let title = wins.first(where: { $0.id == s })?.title, matches(title) {
                 return s
             }
         }
-        for (id, title) in wins where isPairPane(title) {
+        for (id, title) in wins where matches(title) {
             return id
         }
-        Pong.log("theme resolve miss token=\(viewToken) windows=\(wins.map { $0.title }.joined(separator: " || "))")
+        Pong.log("theme resolve miss token=\(viewToken) pair=\(pair ?? "") seat=\(seat ?? "") windows=\(wins.map { $0.title }.joined(separator: " || "))")
         return nil
     }
 
@@ -948,14 +1241,17 @@ enum TerminalTheme {
             let s = "\(v)"; return (s == "<null>" || s.isEmpty) ? nil : s
         }
         let hToken = viewToken(pair: pair, role: "hermes")
-        let hid = resolvePairWindow(stored: storedH, viewToken: hToken)
+        let hid = resolvePairWindow(stored: storedH, viewToken: hToken, pair: pair, seat: "c1")
         let condType = (entry["conductor"] as? [String: Any])?["type"] as? String
         let condLabel = (entry["conductor"] as? [String: Any])?["label"] as? String
-        let hubTitle = "\(condLabel ?? "Conductor") · \(hermesLabel)"
+        // V5: exact isolation token as primary title; human label secondary in custom title only
+        let hubExact = exactSeatTitle(pair: pair, seat: "c1")
+        let hubTitle = hubExact
         apply(windowId: hid, displayTitle: hubTitle, viewToken: hToken,
               colors: hColors, profile: profileName(pair: pair, role: "hermes"))
         tmuxTitle(baseSession: pair, tmuxIndex: 0, displayTitle: hubTitle)
         _ = condType // reserved for future per-conductor chrome
+        _ = hermesLabel
 
         var ws = Workers.list(from: entry)
         var changed = false
@@ -965,12 +1261,14 @@ enum TerminalTheme {
             let storedW = "\(ws[i]["window_id"] ?? "")"
             let storedOpt = Int(storedW) != nil ? storedW : nil
             let token = viewToken(pair: pair, role: id)
-            let wid = resolvePairWindow(stored: storedOpt, viewToken: token)
+            let wid = resolvePairWindow(stored: storedOpt, viewToken: token, pair: pair, seat: id)
             let cols = Colors.from(ws[i]["colors"]) ?? .workerDefault
-            apply(windowId: wid, displayTitle: lab, viewToken: token,
+            let seatExact = exactSeatTitle(pair: pair, seat: id)
+            apply(windowId: wid, displayTitle: seatExact, viewToken: token,
                   colors: cols, profile: profileName(pair: pair, role: id))
             let tmuxIdx = (ws[i]["tmux_index"] as? Int) ?? (i + 1)
-            tmuxTitle(baseSession: pair, tmuxIndex: tmuxIdx, displayTitle: lab)
+            tmuxTitle(baseSession: pair, tmuxIndex: tmuxIdx, displayTitle: seatExact)
+            _ = lab
             if let wid, storedW != wid {
                 ws[i]["window_id"] = wid
                 changed = true
@@ -993,6 +1291,32 @@ enum TerminalTheme {
     }
 }
 
+// MARK: - Tmux scrollback (Terminal scrollbar is blank without this)
+
+/// Pair windows are `tmux attach`. Tmux owns pane history; Terminal’s scrollbar
+/// only shows its own buffer (often empty under the alternate screen). Enable
+/// large history + mouse so trackpad scroll reads real pane output.
+enum TmuxScroll {
+    static func apply(session: String? = nil) {
+        _ = Pong.sh("tmux set-option -g history-limit 100000 2>/dev/null || true")
+        _ = Pong.sh("tmux set-option -g mouse on 2>/dev/null || true")
+        _ = Pong.sh("tmux set-option -g focus-events on 2>/dev/null || true")
+        if let session, !session.isEmpty {
+            let s = session.replacingOccurrences(of: "'", with: "")
+            _ = Pong.sh("tmux set-option -t '\(s)' history-limit 100000 2>/dev/null || true")
+            _ = Pong.sh("tmux set-option -t '\(s)' mouse on 2>/dev/null || true")
+        }
+    }
+
+    static func applyAllLive() {
+        apply()
+        let out = Pong.sh("tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
+        for name in out.split(whereSeparator: \.isNewline).map(String.init) where !name.isEmpty {
+            apply(session: name)
+        }
+    }
+}
+
 
 // MARK: - Saved teams (~/.hermes-pong/teams.json)
 
@@ -1000,6 +1324,16 @@ enum TerminalTheme {
 /// Spawnable from Show Teams…
 enum SavedTeams {
     static var path: String { Pong.stateDir + "/teams.json" }
+
+    /// What to include when snapshotting a live pair into a reusable team.
+    struct SaveOptions {
+        var workers = true
+        var colors = true
+        var projectRoot = true
+        var teamBrief = true
+        var cronJobs = true
+        var perms = true
+    }
 
     struct Team {
         let id: String
@@ -1009,6 +1343,8 @@ enum SavedTeams {
         let workers: [[String: Any]]
         let projectRoot: String
         let teamBrief: String
+        /// Cron jobs template (dicts) restored on spawn.
+        let cronJobs: [[String: Any]]
     }
 
     static func loadAll() -> [Team] {
@@ -1026,13 +1362,14 @@ enum SavedTeams {
                 hermesColors: row["colors"] as? [String: Any],
                 workers: workers,
                 projectRoot: (row["project_root"] as? String) ?? "",
-                teamBrief: (row["team_brief"] as? String) ?? ""
+                teamBrief: (row["team_brief"] as? String) ?? "",
+                cronJobs: (row["cron_jobs"] as? [[String: Any]]) ?? []
             ))
         }
         return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    static func saveFromLivePair(_ pair: String, teamName: String) -> Team? {
+    static func saveFromLivePair(_ pair: String, teamName: String, options: SaveOptions = SaveOptions()) -> Team? {
         let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
         let ws = Workers.list(from: entry)
         if ws.isEmpty { return nil }
@@ -1045,8 +1382,8 @@ enum SavedTeams {
                 "label": (w["label"] as? String) ?? "Worker",
                 "cmd": (w["cmd"] as? String) ?? "claude",
             ]
-            if let perms = w["permissions"] as? [String: Any] { c["permissions"] = perms }
-            if let colors = w["colors"] as? [String: Any] { c["colors"] = colors }
+            if options.perms, let perms = w["permissions"] as? [String: Any] { c["permissions"] = perms }
+            if options.colors, let colors = w["colors"] as? [String: Any] { c["colors"] = colors }
             cleanWorkers.append(c)
         }
         var trimmed = teamName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1060,18 +1397,22 @@ enum SavedTeams {
             id = "team-\(Int(Date().timeIntervalSince1970))-\(Int.random(in: 100...999))"
         }
         let display = (entry["display_name"] as? String) ?? trimmed
+        let cronJobs: [[String: Any]] = options.cronJobs
+            ? CronSchedule.load(session: pair).map { $0.asDict() }
+            : []
         let team = Team(
             id: id,
             name: trimmed,
             displayName: display.isEmpty ? trimmed : display,
-            hermesColors: entry["colors"] as? [String: Any],
+            hermesColors: options.colors ? (entry["colors"] as? [String: Any]) : nil,
             workers: cleanWorkers,
-            projectRoot: (entry["project_root"] as? String) ?? "",
-            teamBrief: (entry["team_brief"] as? String) ?? ""
+            projectRoot: options.projectRoot ? ((entry["project_root"] as? String) ?? "") : "",
+            teamBrief: options.teamBrief ? ((entry["team_brief"] as? String) ?? "") : "",
+            cronJobs: cronJobs
         )
         list.append(team)
         writeAll(list)
-        Pong.log("saved team id=\(id) name=\(trimmed) workers=\(cleanWorkers.count)")
+        Pong.log("saved team id=\(id) name=\(trimmed) workers=\(cleanWorkers.count) cron=\(cronJobs.count)")
         return team
     }
 
@@ -1099,7 +1440,8 @@ enum SavedTeams {
             hermesColors: src.hermesColors,
             workers: src.workers,
             projectRoot: src.projectRoot,
-            teamBrief: src.teamBrief
+            teamBrief: src.teamBrief,
+            cronJobs: src.cronJobs
         )
         list.append(team)
         writeAll(list)
@@ -1118,6 +1460,7 @@ enum SavedTeams {
             if let c = t.hermesColors { row["colors"] = c }
             if !t.projectRoot.isEmpty { row["project_root"] = t.projectRoot }
             if !t.teamBrief.isEmpty { row["team_brief"] = t.teamBrief }
+            if !t.cronJobs.isEmpty { row["cron_jobs"] = t.cronJobs }
             return row
         }
         Pong.writeJSON(path, ["teams": rows, "updated": Date().timeIntervalSince1970])
@@ -1176,10 +1519,17 @@ enum SavedTeams {
         usleep(400_000)
         TerminalTheme.applyPair(pair)
         Workers.writeBriefFile(session: pair, brief: team.teamBrief)
+        // Restore cron jobs (if saved with the team)
+        if !team.cronJobs.isEmpty {
+            let jobs = team.cronJobs.compactMap { CronSchedule.Job.from($0) }
+            if !jobs.isEmpty {
+                CronSchedule.save(session: pair, jobs: jobs)
+            }
+        }
         // Re-write the bind card now that project_root/team_brief are on the
         // live entry — the first card (written at pair start) predates them.
         Pong.sh("python3 $HOME/bin/hermes_pong.py write-bind --session \(pair) >/dev/null 2>&1 || true")
-        Pong.log("spawned team \(team.name) → \(pair)")
+        Pong.log("spawned team \(team.name) → \(pair) cron=\(team.cronJobs.count)")
         return pair
     }
 }
@@ -1323,13 +1673,287 @@ enum Pairing {
         if (entry["stowed"] as? Bool) == true { unstow(name) }
         // Raise the WHOLE team (every saved worker window + Hermes), not just
         // Hermes + primary worker. pairWindowIds orders Hermes last = on top.
-        let ids = pairWindowIds(name)
+        // Dead ids (user closed the Terminal) are skipped — Open on a cube
+        // re-attaches that seat with full tmux history.
+        let ids = livePairWindowIds(name)
         if !ids.isEmpty {
             flashWindows(ids)
         } else {
-            Pong.sh("tmux switch-client -t \(name):0 2>/dev/null || true")
-            Pong.osascript("tell application \"Terminal\" to activate")
+            // Nothing open: re-open conductor only (not every worker — no dock pile)
+            frontConductor(name)
         }
+    }
+
+    /// Open / raise the orchestrator Terminal for this team.
+    /// Safe after the user closed the window — re-attaches to tmux (history intact).
+    static func frontConductor(_ pair: String) {
+        Pong.log("frontConductor begin \(pair)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            Workers.scrubInvalidWindowIds(pair: pair)
+            let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
+            let view = (entry["view_hermes"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ?? TerminalTheme.viewToken(pair: pair, role: "hermes")
+            let stored = "\(entry["hermes_window_id"] ?? (entry["conductor"] as? [String: Any])?["window_id"] ?? "")"
+            let storedOpt: String? = {
+                guard Int(stored) != nil else { return nil }
+                let title = TerminalTheme.listWindows().first(where: { $0.id == stored })?.title ?? ""
+                if TerminalTheme.isPairAttachTitle(title, viewToken: view) { return stored }
+                return nil
+            }()
+            Pong.log("frontConductor resolve pair=\(pair) view=\(view) stored=\(storedOpt ?? "-")")
+            guard let live = frontOrReopenAttach(
+                pair: pair, view: view, tmuxIndex: 0, storedWindowId: storedOpt
+            ) else {
+                Pong.log("frontConductor reopen failed \(pair) view=\(view)")
+                return
+            }
+            guard raiseOnlyIfPairAttach(live, viewToken: view) else {
+                Pong.log("frontConductor refused raise id=\(live)")
+                if let again = openAttachSession(view) {
+                    _ = raiseOnlyIfPairAttach(again, viewToken: view)
+                    Workers.setConductorWindowId(pair: pair, windowId: again)
+                }
+                return
+            }
+            Workers.setConductorWindowId(pair: pair, windowId: live)
+            let condLabel = (entry["conductor"] as? [String: Any])?["label"] as? String
+            let display = (entry["display_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? pair
+            TerminalTheme.apply(windowId: live,
+                displayTitle: "\(condLabel ?? "Conductor") · \(display)",
+                viewToken: view,
+                colors: TerminalTheme.Colors.from(entry["colors"]),
+                profile: TerminalTheme.profileName(pair: pair, role: "hermes"))
+            Pong.log("frontConductor ok \(pair) → window \(live)")
+        }
+    }
+
+    // MARK: - Re-open after Terminal close (tmux history stays)
+
+    /// PATH prefix used when spawning attach clients.
+    private static let pathExport =
+        "export PATH=/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.local/bin:$PATH"
+
+    /// Absolute tmux binary (do-script shells often lack brew PATH).
+    private static var tmuxBin: String {
+        let found = Pong.sh("command -v tmux 2>/dev/null || true")
+        if found.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: found) {
+            return found
+        }
+        for c in ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"] {
+            if FileManager.default.isExecutableFile(atPath: c) { return c }
+        }
+        return "tmux"
+    }
+
+    /// Raise an existing Terminal window (unhide / unminiaturize / front).
+    /// Prefer `visible` over miniaturize so we never stack Dock minimized tiles.
+    static func raiseTerminalWindow(_ windowId: String) {
+        guard Int(windowId) != nil else { return }
+        let out = Pong.osascript("""
+        tell application "Terminal"
+          try
+            set w to window id \(windowId)
+            set visible of w to true
+            try
+              set miniaturized of w to false
+            end try
+            set index of w to 1
+            set frontmost of w to true
+            activate
+            return "OK"
+          on error errMsg
+            return "ERR:" & errMsg
+          end try
+        end tell
+        """)
+        Pong.log("raiseTerminalWindow id=\(windowId) → \(out)")
+    }
+
+    /// Raise only if the window title is a real `tmux attach-session -t <viewToken>`.
+    /// Refuses free `grok ▸` / `hermes ▸` windows that were mis-bound as seat ids.
+    @discardableResult
+    static func raiseOnlyIfPairAttach(_ windowId: String, viewToken: String) -> Bool {
+        guard Int(windowId) != nil else { return false }
+        let title = TerminalTheme.listWindows().first(where: { $0.id == windowId })?.title ?? ""
+        guard TerminalTheme.isPairAttachTitle(title, viewToken: viewToken) else {
+            Pong.log("raiseOnlyIfPairAttach BLOCKED id=\(windowId) token=\(viewToken) title=\(title)")
+            return false
+        }
+        raiseTerminalWindow(windowId)
+        // Re-assert front after a beat (Terminal sometimes re-fronts another tab group)
+        usleep(80_000)
+        raiseTerminalWindow(windowId)
+        return true
+    }
+
+    /// Open a **dedicated** Terminal window that attaches to `viewSession`.
+    ///
+    /// Critical: plain `do script` often opens as a *tab on the front Terminal*
+    /// (e.g. a free-floating Grok window). That made Open raise the wrong app.
+    /// Launching a `.command` file via `open` always gets its own window.
+    static func openAttachSession(_ viewSession: String) -> String? {
+        let safe = viewSession
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: ";", with: "")
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+        let tmux = tmuxBin
+        let before = Set(TerminalTheme.listWindows().map(\.id))
+        Pong.log("openAttachSession begin view=\(safe) tmux=\(tmux) beforeWindows=\(before.count)")
+
+        // Unique marker so we never confuse this with a free Grok TUI window.
+        // On ANY exit (detach, session death, missing session) close ONLY windows
+        // carrying this marker — never "front window". Drop `exec` so the script
+        // regains control and the EXIT trap can run (no zombie "[Process completed]").
+        let marker = "PONGATTACH:\(safe)"
+        let dir = NSTemporaryDirectory() + "pong-attach/"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = dir + "\(safe)-\(Int(Date().timeIntervalSince1970)).command"
+        let body = """
+        #!/bin/bash
+        export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.local/bin:$PATH"
+        MARK='\(marker)'
+        printf '\\033]0;%s\\007' "$MARK"
+        close_self() {
+          # Re-assert marker (tmux overwrites the title while attached), then close
+          # only windows with our unique mark — never "front window".
+          printf '\\033]0;%s\\007' "$MARK"
+          osascript -e 'tell application "Terminal" to close (every window whose name contains "'"$MARK"'")' >/dev/null 2>&1 || true
+        }
+        trap close_self EXIT
+        if ! "\(tmux)" has-session -t "\(safe)" 2>/dev/null; then
+          echo "CyberPong: tmux session '\(safe)' not found — seat may be dead." >&2
+          sleep 0.6
+          exit 1
+        fi
+        "\(tmux)" attach-session -t "\(safe)"
+        # detach / kill / fail → EXIT trap closes this window
+        """
+        do {
+            try body.write(toFile: path, atomically: true, encoding: .utf8)
+        } catch {
+            Pong.log("openAttachSession write fail \(error)")
+            return nil
+        }
+        let qPath = path.replacingOccurrences(of: "'", with: "'\\''")
+        _ = Pong.sh("chmod +x '\(qPath)'")
+        // Launch WITHOUT focusing Terminal first — reduces tab-on-Grok behavior
+        let openOut = Pong.sh("open '\(qPath)' 2>&1")
+        if !openOut.isEmpty { Pong.log("openAttachSession open → \(openOut)") }
+
+        func matchesOurAttach(_ title: String) -> Bool {
+            let t = title.lowercased()
+            if t.contains("grok ▸") || t.contains("hermes ▸") { return false }
+            if t.contains(marker.lowercased()) { return true }
+            return TerminalTheme.isPairAttachTitle(title, viewToken: safe)
+        }
+
+        var found: String?
+        for attempt in 1...20 {
+            usleep(150_000)
+            let after = TerminalTheme.listWindows()
+            // Only brand-new windows that look like our attach
+            if let fresh = after.first(where: { !before.contains($0.id) && matchesOurAttach($0.title) }) {
+                found = fresh.id
+                Pong.log("openAttachSession \(safe) → \(fresh.id) (new attempt=\(attempt)) title=\(fresh.title)")
+                break
+            }
+            // New window still renaming
+            if attempt >= 4, let fresh = after.last(where: { !before.contains($0.id) }) {
+                Pong.log("openAttachSession pending id=\(fresh.id) title=\(fresh.title) attempt=\(attempt)")
+                if matchesOurAttach(fresh.title) {
+                    found = fresh.id
+                    break
+                }
+            }
+        }
+        if let found {
+            _ = raiseOnlyIfPairAttach(found, viewToken: safe)
+                || {
+                    // Title may still be marker-only before tmux retitles
+                    let title = TerminalTheme.listWindows().first(where: { $0.id == found })?.title ?? ""
+                    if matchesOurAttach(title) {
+                        raiseTerminalWindow(found)
+                        return true
+                    }
+                    return false
+                }()
+            return found
+        }
+        let titles = TerminalTheme.listWindows().map { "\($0.id):\($0.title)" }.joined(separator: " || ")
+        Pong.log("openAttachSession \(safe) → FAILED (no new attach window) windows=\(titles)")
+        // Do NOT fall back to do-script (that tabs onto free Grok windows)
+        return nil
+    }
+
+    /// If a live Terminal is still attached to this view, raise it.
+    /// If the user closed it, open a fresh attach client to the same tmux session
+    /// (agents + history still running). No minimized Dock stubs.
+    @discardableResult
+    static func frontOrReopenAttach(
+        pair: String, view: String, tmuxIndex: Int, storedWindowId: String?
+    ) -> String? {
+        // 1) Live attach for THIS view only (never free Grok by stored id)
+        if let live = TerminalTheme.resolvePairWindow(stored: storedWindowId, viewToken: view) {
+            Pong.log("frontOrReopenAttach existing view=\(view) id=\(live)")
+            if raiseOnlyIfPairAttach(live, viewToken: view) {
+                return live
+            }
+            Pong.log("frontOrReopenAttach existing refused — will reopen view=\(view)")
+        } else {
+            Pong.log("frontOrReopenAttach no live window view=\(view) stored=\(storedWindowId ?? "-")")
+        }
+
+        // 2) Base team session must still exist (agents live here)
+        let baseOK = Pong.sh("tmux has-session -t \(pair) 2>/dev/null && echo yes || echo no")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard baseOK == "yes" else {
+            Pong.log("frontOrReopenAttach: base tmux session missing pair=\(pair)")
+            return nil
+        }
+
+        // 3) Ensure a linked view session pointed at the right window
+        let viewOK = Pong.sh("tmux has-session -t \(view) 2>/dev/null && echo yes || echo no")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if viewOK != "yes" {
+            Pong.log("frontOrReopenAttach creating view session \(view) → \(pair)")
+            Pong.sh("tmux new-session -d -s \(view) -t \(pair) 2>/dev/null || true")
+        }
+        Pong.sh("tmux select-window -t \(view):\(tmuxIndex) 2>/dev/null || tmux select-window -t \(pair):\(tmuxIndex) 2>/dev/null || true")
+        TmuxScroll.apply(session: pair)
+        TmuxScroll.apply(session: view)
+
+        // 4) New Terminal client — history is in tmux, not the closed window
+        return openAttachSession(view)
+    }
+
+    /// Stored window ids that still exist **and** are real attach clients for this pair.
+    private static func livePairWindowIds(_ name: String) -> [String] {
+        var entry = PairState.loadPairsDb()[name] as? [String: Any] ?? [:]
+        if entry.isEmpty {
+            let cur = Pong.loadJSON(PairState.activePath)
+            if cur["session"] as? String == name { entry = cur }
+        }
+        var ids: [String] = []
+        for w in Workers.list(from: entry) {
+            let wid = "\(w["window_id"] ?? "")"
+            let role = (w["id"] as? String) ?? "w1"
+            let token = TerminalTheme.viewToken(pair: name, role: role)
+            if let live = TerminalTheme.resolvePairWindow(
+                stored: Int(wid) != nil ? wid : nil, viewToken: token
+            ), !ids.contains(live) {
+                ids.append(live)
+            }
+        }
+        let hTok = TerminalTheme.viewToken(pair: name, role: "hermes")
+        let hStored = "\(entry["hermes_window_id"] ?? "")"
+        if let live = TerminalTheme.resolvePairWindow(
+            stored: Int(hStored) != nil ? hStored : nil, viewToken: hTok
+        ), !ids.contains(live) {
+            ids.append(live)
+        }
+        return ids
     }
 
     // MARK: Stow (hide a team's Terminal windows; pair + tmux keep running)
@@ -1438,38 +2062,53 @@ enum Pairing {
         }
 
         Pong.sh("tmux new-session -d -s \(name) -n Conductor")
-        // Team identity: PONG_SESSION (+ legacy HERMES_PONG_SESSION for old skills)
+        TmuxScroll.apply(session: name)
+        // Team identity: PONG_SESSION + PONG_TOKEN (isolation; Addendum 2)
         Pong.sh("tmux set-environment -t \(name) PONG_SESSION \(name)")
         Pong.sh("tmux set-environment -t \(name) HERMES_PONG_SESSION \(name)")
         Pong.sh("tmux set-environment -t \(name) PONG_ROLE conductor")
         Pong.sh("tmux set-environment -t \(name) HERMES_PONG_ROLE orchestra")
-        let orchestraEnv = "export PONG_SESSION=\(name) HERMES_PONG_SESSION=\(name) PONG_ROLE=conductor HERMES_PONG_ROLE=orchestra"
-        let writeBind = "python3 $HOME/bin/hermes_pong.py write-bind --session \(name) >/dev/null 2>&1 || python3 $HOME/bin/pong status -s \(name) >/dev/null 2>&1 || true"
+        let sessionToken = Isolation.ensureToken(session: name)
+        if !sessionToken.isEmpty {
+            Pong.sh("tmux set-environment -t \(name) PONG_TOKEN \(sessionToken)")
+        }
+        let tokenExport = sessionToken.isEmpty ? "" : " export PONG_TOKEN=\(sessionToken);"
+        let orchestraEnv = "export PONG_SESSION=\(name) HERMES_PONG_SESSION=\(name) PONG_ROLE=conductor HERMES_PONG_ROLE=orchestra;\(tokenExport)"
+        let writeBind = "python3 $HOME/bin/hermes_pong.py write-bind --session \(name) >/dev/null 2>&1 || PYTHONPATH=$HOME/.pong/lib${PYTHONPATH:+:$PYTHONPATH} python3 -m pong.cli status -s \(name) >/dev/null 2>&1 || true"
         let banner = "CONDUCTOR · \(condLabel) · \(name):0"
+        let condExact = TerminalTheme.exactSeatTitle(pair: name, seat: "c1")
+        TerminalTheme.tmuxTitle(baseSession: name, tmuxIndex: 0, displayTitle: condExact)
         Pong.sh("tmux send-keys -t \(name):0 -l '\(pathExport); \(orchestraEnv); \(writeBind); printf \"\\n  \(banner)\\n  skill: \(skillHint) · pong gate · pong job create\\n\\n\"; \(safeCondCmd)'")
         usleep(80_000)
         Pong.sh("tmux send-keys -t \(name):0 Enter")
+        Isolation.registerPane(session: name, workerId: "c1", tmuxTarget: "\(name):0", startCommand: condCmd)
 
         var workerRecords: [[String: Any]] = []
         for (idx, worker) in list.enumerated() {
             let wCmd = worker.cmd.trimmingCharacters(in: .whitespacesAndNewlines)
             let launchCmd = wCmd.isEmpty ? "claude" : wCmd
-            let winName = list.count == 1 ? "Worker" : "W\(idx + 1)"
-            Pong.sh("tmux new-window -t \(name) -n \(winName)")
+            let seatId = "w\(idx + 1)"
+            let seatExact = TerminalTheme.exactSeatTitle(pair: name, seat: seatId)
+            let winName = seatExact
+            Pong.sh("tmux new-window -t \(name) -n '\(winName.replacingOccurrences(of: "'", with: ""))'")
             let safeCmd = launchCmd.replacingOccurrences(of: "'", with: "'\\''")
             let wbanner = "WORKER · \(worker.label) · \(name):\(idx + 1)"
-            Pong.sh("tmux send-keys -t \(name):\(idx + 1) -l '\(pathExport); export PONG_SESSION=\(name) HERMES_PONG_SESSION=\(name); printf \"\\n  \(wbanner)\\n\\n\"; \(safeCmd)'")
+            Pong.sh("tmux send-keys -t \(name):\(idx + 1) -l '\(pathExport); export PONG_SESSION=\(name) HERMES_PONG_SESSION=\(name) PONG_SEAT=\(seatId);\(tokenExport) printf \"\\n  \(wbanner)\\n\\n\"; \(safeCmd)'")
             usleep(80_000)
             Pong.sh("tmux send-keys -t \(name):\(idx + 1) Enter")
-            workerRecords.append([
-                "id": "w\(idx + 1)",
+            TerminalTheme.tmuxTitle(baseSession: name, tmuxIndex: idx + 1, displayTitle: seatExact)
+            let paneId = Isolation.registerPane(session: name, workerId: seatId, tmuxTarget: "\(name):\(idx + 1)", startCommand: launchCmd)
+            var rec: [String: Any] = [
+                "id": seatId,
                 "type": worker.id,
                 "label": worker.label,
                 "cmd": launchCmd,
                 "mode": "tmux",
                 "tmux_index": idx + 1,
                 "done_marker": worker.id == "claude" ? "##CLAUDE_DONE##" : "##WORKER_DONE##",
-            ])
+            ]
+            if !paneId.isEmpty { rec["pane_id"] = paneId }
+            workerRecords.append(rec)
         }
 
         Pong.sh("tmux new-session -d -s \(viewH) -t \(name)")
@@ -1486,41 +2125,25 @@ enum Pairing {
             Pong.sh("tmux select-window -t \(name)-c:1")
         }
 
-        // Open Terminals one-by-one.
-        // Never bare `activate` first — that spawns a blank extra window.
-        // Capture ids via before/after diff so workers never share one window id.
-        func openAttach(_ session: String, used: inout Set<String>) -> String? {
-            let before = Set(TerminalTheme.listWindows().map(\.id))
-            let script = """
-            tell application "Terminal"
-              do script "\(pathExport); exec tmux attach-session -t \(session)"
-              delay 0.75
-            end tell
-            """
-            _ = Pong.osascript(script)
-            usleep(250_000)
-            let after = TerminalTheme.listWindows()
-            let fresh = after.filter { !before.contains($0.id) && !used.contains($0.id) }
-            if let best = fresh.last {
-                used.insert(best.id)
-                Pong.log("openAttach \(session) → \(best.id) (new) \(best.title)")
-                return best.id
-            }
-            if let hit = after.first(where: { !used.contains($0.id) && $0.title.contains(session) }) {
-                used.insert(hit.id)
-                Pong.log("openAttach \(session) → \(hit.id) (title)")
-                return hit.id
-            }
-            Pong.log("openAttach \(session) → FAILED")
-            return nil
-        }
-
+        // Open Terminals one-by-one via .command launchers (never tab onto a free Grok window).
         let baselineWindows = Set(TerminalTheme.listWindows().map(\.id))
         var usedWindowIds = Set<String>()
-        let hid = openAttach(viewH, used: &usedWindowIds)
+        func openAttach(_ session: String) -> String? {
+            guard let id = openAttachSession(session), !usedWindowIds.contains(id) else {
+                // Retry once if id collision
+                if let id = openAttachSession(session) {
+                    usedWindowIds.insert(id)
+                    return id
+                }
+                return nil
+            }
+            usedWindowIds.insert(id)
+            return id
+        }
+        let hid = openAttach(viewH)
         var windowIds: [String] = []
         for vn in viewNames {
-            windowIds.append(openAttach(vn, used: &usedWindowIds) ?? "")
+            windowIds.append(openAttach(vn) ?? "")
         }
         // Close accidental blank windows created during launch
         let afterAll = TerminalTheme.listWindows()
@@ -1627,6 +2250,7 @@ enum Pairing {
             return
         }
         Pong.sh("tmux has-session -t \(name) 2>/dev/null || tmux new-session -d -s \(name) -n Hermes")
+        TmuxScroll.apply(session: name)
 
         let hermesTui = looksLikeTui(hermesId)
         if !hermesTui {
@@ -1822,7 +2446,7 @@ enum Tips {
 
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Enjoying Pong?"
+        alert.messageText = "Enjoying \(PongTheme.productName)?"
         alert.informativeText =
             "You've linked \(count) pairs — nice.\n\n" +
             "The app is free forever. If it's useful, a small tip helps keep shipping.\n\n" +
@@ -1878,20 +2502,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        PongTheme.registerBundledFonts()
         installMainMenu()
+        // Existing pair terminals: enable mouse scroll + deep history immediately
+        TmuxScroll.applyAllLive()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
             button.image = PongTheme.menuIcon(signal: .idle, phase: 0)
             button.image?.isTemplate = false
             button.title = ""
-            button.toolTip = "Pong — agent mission control"
+            button.toolTip = "\(PongTheme.productName) — agent mission control"
             button.appearsDisabled = false
         }
         statusItem.isVisible = true
         rebuildMenu()
 
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        // 0.5s menu icon pulse is enough — 0.1s was main-thread noise
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.tick()
         }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
@@ -1915,10 +2543,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mainMenu = NSMenu()
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
-        let appMenu = NSMenu(title: "Pong")
+        let appMenu = NSMenu(title: PongTheme.productName)
         appItem.submenu = appMenu
 
-        let about = NSMenuItem(title: "About Pong", action: #selector(showAbout), keyEquivalent: "")
+        let about = NSMenuItem(title: "About \(PongTheme.productName)", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         appMenu.addItem(about)
         appMenu.addItem(NSMenuItem.separator())
@@ -1933,7 +2561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appMenu.addItem(tip)
         appMenu.addItem(NSMenuItem.separator())
 
-        let quit = NSMenuItem(title: "Quit Pong", action: #selector(quitAll), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit \(PongTheme.productName)", action: #selector(quitAll), keyEquivalent: "q")
         quit.keyEquivalentModifierMask = [.command]
         quit.target = self
         appMenu.addItem(quit)
@@ -1954,8 +2582,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func showAbout() {
         let alert = NSAlert()
-        alert.messageText = "Pong"
-        alert.informativeText = "Local agent mission control.\nOrchestrator + multi-CLI workers on a canvas.\nkulpio/Agent-Pong"
+        alert.messageText = PongTheme.productName
+        alert.informativeText = "\(PongTheme.productTagline).\nOrchestrator + multi-CLI workers on a canvas.\nPublic name: CyberPong · internal: Pong"
         alert.runModal()
     }
 
@@ -1990,13 +2618,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         stack.addArrangedSubview(label("Two one-time macOS permissions", bold: true, size: 15))
         stack.addArrangedSubview(label(
-            "Pong pairs orchestrator and worker Terminal windows. macOS asks once for each permission below.",
+            "\(PongTheme.productName) pairs orchestrator and worker Terminal windows. macOS asks once for each permission below.",
             muted: true))
 
         stack.setCustomSpacing(16, after: stack.arrangedSubviews.last!)
         stack.addArrangedSubview(label("Automation", bold: true))
         stack.addArrangedSubview(label(
-            "Pong can send tasks into Terminal windows. macOS prompts the first time — re-enable in Settings if you decline.",
+            "\(PongTheme.productName) can send tasks into Terminal windows. macOS prompts the first time — re-enable in Settings if you decline.",
             muted: true))
         stack.addArrangedSubview(button("Open Automation Settings…", #selector(openAutomationSettings)))
 
@@ -2023,7 +2651,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Welcome to Pong"
+        window.title = "Welcome to \(PongTheme.productName)"
         window.isReleasedWhenClosed = false
         guard let content = window.contentView else { return }
         content.addSubview(stack)
@@ -2134,11 +2762,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.title = ""
         switch menuSignal {
         case .idle:
-            button.toolTip = "Pong — idle"
+            button.toolTip = "\(PongTheme.productName) — idle"
         case .orchestratorWorking:
-            button.toolTip = "Pong — orchestrator working"
+            button.toolTip = "\(PongTheme.productName) — orchestrator working"
         case .humanNeeded:
-            button.toolTip = "Pong — human input needed"
+            button.toolTip = "\(PongTheme.productName) — human input needed"
         }
     }
 
@@ -2229,7 +2857,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Refresh", #selector(refreshMenu)))
         menu.addItem(item("Tip developer…", #selector(tipDeveloper)))
         menu.addItem(.separator())
-        menu.addItem(item("Quit Pong", #selector(quitAll)))
+        menu.addItem(item("Quit \(PongTheme.productName)", #selector(quitAll)))
     }
 
     private func item(_ title: String, _ sel: Selector) -> NSMenuItem {
@@ -2248,18 +2876,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func newPair() {
-        guard let (conductor, workers) = Self.pickTeamLaunch() else {
-            lastSessionPoll = .distantPast
-            rebuildMenu()
+        Self.launchTeamWithOptionalWizard { [weak self] in
+            self?.lastSessionPoll = .distantPast
+            self?.rebuildMenu()
             PanelController.shared.refreshUI()
+        }
+    }
+
+    /// Pick types → optional install wizard (names, roles, policy, SOUL/SKILL) → startFresh.
+    static func launchTeamWithOptionalWizard(completion: (() -> Void)? = nil) {
+        guard let (conductor, workers) = pickTeamLaunch() else {
+            completion?()
             return
         }
-        if workers.isEmpty { return }
+        if workers.isEmpty {
+            completion?()
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let ask = NSAlert()
+        ask.messageText = "Team setup"
+        ask.informativeText =
+            "Guided setup helps you name seats, assign who orchestrates / codes / reviews / acts, " +
+            "set session policy, and write SOUL.md + SKILL.md for a strong team build.\n\n" +
+            "Quick launch skips files and uses default names."
+        ask.addButton(withTitle: "Guided setup…")
+        ask.addButton(withTitle: "Quick launch")
+        ask.addButton(withTitle: "Cancel")
+        let r = ask.runModal()
+        let first = NSApplication.ModalResponse.alertFirstButtonReturn
+        if r == NSApplication.ModalResponse(rawValue: first.rawValue + 2) {
+            completion?()
+            return
+        }
+        if r == first {
+            TeamInstallWizard.shared.run(conductor: conductor, workers: workers, onFinish: { plan in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let name = Pairing.startFresh(
+                        workers: plan.workers.map(\.type),
+                        conductor: plan.conductor
+                    )
+                    usleep(300_000)
+                    TeamWizardApply.apply(plan, session: name)
+                    DispatchQueue.main.async {
+                        PanelController.showPairPersistTip(name)
+                        completion?()
+                        PanelController.shared.refreshUI()
+                    }
+                }
+            }, onCancel: {
+                completion?()
+            })
+            return
+        }
+        // Quick launch
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = Pairing.startFresh(workers: workers, conductor: conductor)
-            DispatchQueue.main.async { [weak self] in
-                self?.lastSessionPoll = .distantPast
-                self?.rebuildMenu()
+            let name = Pairing.startFresh(workers: workers, conductor: conductor)
+            DispatchQueue.main.async {
+                PanelController.showPairPersistTip(name)
+                completion?()
                 PanelController.shared.refreshUI()
             }
         }
@@ -2762,7 +3437,7 @@ final class TeamBuilderPanel: NSObject {
         var y = H - 28
 
         let title = NSTextField(labelWithString: mode == .oneModel
-            ? "Pick one worker under Hermes"
+            ? "Pick one worker under the conductor"
             : "Build a team (vertical list)")
         title.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
         title.textColor = .white
@@ -2771,8 +3446,8 @@ final class TeamBuilderPanel: NSObject {
         y -= 36
 
         let sub = NSTextField(wrappingLabelWithString: mode == .oneModel
-            ? "One model + Hermes. Same Active pair row."
-            : "Add models top → bottom. One Hermes orchestrates all.")
+            ? "One worker seat + conductor. Same active team row."
+            : "Add seats top → bottom. One conductor plans for the team.")
         sub.font = NSFont.systemFont(ofSize: 11)
         sub.textColor = NSColor(calibratedWhite: 0.6, alpha: 1)
         sub.frame = NSRect(x: 20, y: y - 32, width: W - 40, height: 34)
@@ -3290,36 +3965,30 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
             contentRect: NSRect(x: 0, y: 0, width: W, height: H),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
-        win.title = "Pair permissions"
+        PongSheetChrome.styleWindow(win, title: "Seat policy")
         win.isReleasedWhenClosed = false
-        win.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.07, blue: 0.08, alpha: 1.0)
         win.delegate = self
         win.level = .floating
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        let content = PongSheetChrome.rootView(width: W, height: H)
         contentRoot = content
         let PAD: CGFloat = 22
         var y = H - PAD - 8
 
-        let title = NSTextField(labelWithString: "Access for this pair")
-        title.font = .boldSystemFont(ofSize: 16)
-        title.frame = NSRect(x: PAD, y: y - 20, width: W - 2 * PAD, height: 22)
+        let title = PongSheetChrome.titleLabel("Session access policy", frame: NSRect(x: PAD, y: y - 20, width: W - 2 * PAD, height: 22))
         content.addSubview(title)
         y -= 28
 
-        let sub = NSTextField(wrappingLabelWithString:
-            "Checked boxes ban that access on every handoff. “Ask each time” makes Claude request elevated access in chat first. Save a preset once, reuse it on any pair.")
-        sub.font = .systemFont(ofSize: 12)
-        sub.textColor = .secondaryLabelColor
-        sub.frame = NSRect(x: PAD, y: y - 48, width: W - 2 * PAD, height: 48)
+        let sub = PongSheetChrome.bodyLabel(
+            "Checked boxes ban that access on every handoff. “Ask each time” requires elevated access approval in chat first. Live layer only — not standing grants.",
+            frame: NSRect(x: PAD, y: y - 48, width: W - 2 * PAD, height: 48))
         content.addSubview(sub)
         y -= 56
 
-        // Preset bar
-        let presetLbl = NSTextField(labelWithString: "PRESETS")
-        presetLbl.font = .systemFont(ofSize: 10)
-        presetLbl.textColor = .secondaryLabelColor
-        presetLbl.frame = NSRect(x: PAD, y: y - 14, width: 80, height: 14)
+        content.addSubview(PongSheetChrome.hairline(x: PAD, y: y, width: W - 2 * PAD))
+        y -= 14
+
+        let presetLbl = PongSheetChrome.sectionLabel("Presets", frame: NSRect(x: PAD, y: y - 14, width: 120, height: 14))
         content.addSubview(presetLbl)
         y -= 20
 
@@ -3476,11 +4145,11 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
 
     private func loadIntoUI() {
         if let workerId {
-            window?.title = "Permissions · \(pairName) / \(workerId)"
+            window?.title = "Seat policy · \(pairName) / \(workerId)"
             let perms = Workers.permissions(pair: pairName, workerId: workerId)
             applyPermissionsToUI(perms, status: matchStatus(for: perms))
         } else {
-            window?.title = "Permissions · \(pairName) (Hermes / all)"
+            window?.title = "Seat policy · \(pairName) (team / all seats)"
             let perms = PairState.permissions(for: pairName)
             applyPermissionsToUI(perms, status: matchStatus(for: perms))
         }
@@ -3834,24 +4503,59 @@ final class TeamOptionsSheetController: NSObject, NSWindowDelegate {
         persistFields() // snapshot includes what's on screen right now
         let suggestion = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let seed = suggestion.isEmpty ? pairName : suggestion
+        let cronCount = CronSchedule.load(session: pairName).count
+
         let alert = NSAlert()
         alert.messageText = "Save team as…"
-        alert.informativeText = "Reusable under Show Teams: workers, names, colors, perms, project root, and team brief."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        alert.informativeText = "Choose a name and what to include. Saved teams spawn under Show Teams."
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 168))
+        let field = NSTextField(frame: NSRect(x: 0, y: 140, width: 320, height: 24))
         field.stringValue = seed
-        alert.accessoryView = field
+        field.placeholderString = "Team name"
+        box.addSubview(field)
+
+        func check(_ title: String, y: CGFloat, on: Bool) -> NSButton {
+            let b = NSButton(checkboxWithTitle: title, target: nil, action: nil)
+            b.state = on ? .on : .off
+            b.frame = NSRect(x: 0, y: y, width: 320, height: 20)
+            b.font = PongTheme.font(12)
+            box.addSubview(b)
+            return b
+        }
+        let cWorkers = check("Workers · labels · commands", y: 112, on: true)
+        cWorkers.isEnabled = false // always required
+        let cColors = check("Colors (conductor + workers)", y: 90, on: true)
+        let cPerms = check("Per-worker permissions", y: 68, on: true)
+        let cRoot = check("Project root", y: 46, on: true)
+        let cBrief = check("Team brief", y: 24, on: true)
+        let cCron = check("Cron jobs (\(cronCount))", y: 2, on: true)
+
+        alert.accessoryView = box
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
+
+        var opts = SavedTeams.SaveOptions()
+        opts.workers = true
+        opts.colors = cColors.state == .on
+        opts.perms = cPerms.state == .on
+        opts.projectRoot = cRoot.state == .on
+        opts.teamBrief = cBrief.state == .on
+        opts.cronJobs = cCron.state == .on
+
         let a = NSAlert()
-        if SavedTeams.saveFromLivePair(pairName, teamName: name) != nil {
+        if let team = SavedTeams.saveFromLivePair(pairName, teamName: name, options: opts) {
             a.messageText = "Team saved"
-            a.informativeText =
-                "“\(name)” is under Show Teams…\n" +
-                "Includes workers, names, colors, per-worker perms, project root, and team brief."
+            var bits: [String] = ["workers"]
+            if opts.colors { bits.append("colors") }
+            if opts.perms { bits.append("perms") }
+            if opts.projectRoot { bits.append("project root") }
+            if opts.teamBrief { bits.append("brief") }
+            if opts.cronJobs { bits.append("\(team.cronJobs.count) cron job\(team.cronJobs.count == 1 ? "" : "s")") }
+            a.informativeText = "“\(name)” is under Show Teams…\nIncludes: \(bits.joined(separator: " · "))."
         } else {
             a.messageText = "Nothing to save"
             a.informativeText = "This pair has no workers yet."
@@ -3949,7 +4653,7 @@ final class LinkGuideController: NSObject {
             contentRect: NSRect(x: 0, y: 0, width: GW, height: GH),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
-        win.title = "Pong — Link team"
+        win.title = "\(PongTheme.productName) — Link team"
         win.level = .floating
         win.isReleasedWhenClosed = false
         win.backgroundColor = PongTheme.bgElevated

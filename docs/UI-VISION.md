@@ -34,16 +34,21 @@ The home experience is the **canvas**, not a form.
 
 ## Visual language
 
+**Direction:** Anduril Lattice product UI + marketing site restraint.  
+Black chrome, white type, **amber CTAs**, map/canvas as hero, floating HUD panels.  
+Not neon cyber, not soft SaaS purple.
+
 | Token | Choice |
 |-------|--------|
-| Void | Near-black `#0B0B10` |
-| Surface | Elevated cards `#16161F` |
-| Signal | Violet `#8B6CF7` for CTAs, edges, focus |
-| Success / warn | Soft green / amber status pills |
-| Type | SF Pro; display 15–22 semibold for metrics; 12–13 for body |
-| Grid | Subtle dots on canvas only |
-| Radius | 14–16 cards; 8 pills |
-| Density | Generous padding; one primary action per card |
+| Void | Pure black `#000` (map stage) |
+| Surface | Glass-black floating panels |
+| **Line work** | **White** hairlines, frames, graph edges, grid dots |
+| **Orchestrator** | **Blue only** (conductor rail, icon, Open, LIVE) |
+| **Agents** | **Magenta only** (worker rail, icon, Open, LIVE) |
+| Human | Amber (not a seat role) |
+| Type | SF Pro; large editorial titles |
+| Grid | Sparse white **dots** + white corner brackets |
+| Chrome | Black bars; white structure; no blue/magenta on chrome |
 
 ## Canvas
 

@@ -58,6 +58,8 @@ EVENT_TYPES = frozenset(
         "pair.saved",
         "bridge.gate",
         "system",
+        "route.refused",
+        "brief.sent",
     }
 )
 
@@ -152,6 +154,7 @@ def job_summary(job: dict[str, Any]) -> dict[str, Any]:
         "status": job.get("status"),
         "round": job.get("round", 1),
         "task_preview": task_preview(str(job.get("task") or "")),
+        "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
         "human_takeover": bool(job.get("human_takeover")),
         "worker_type": job.get("worker_type"),

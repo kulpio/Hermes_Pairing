@@ -97,10 +97,13 @@ final class TeamFocusController: NSObject {
                 frame: NSRect(x: 16, y: 48, width: boxW - 32, height: 16), size: 10, secondary: true))
         }
         let openOrch = btn("Open orchestrator", #selector(openOrch), filled: true)
-        openOrch.frame = NSRect(x: 16, y: 12, width: 138, height: 28)
+        openOrch.frame = NSRect(x: 16, y: 12, width: 130, height: 28)
         head.addSubview(openOrch)
+        let newJob = btn("New job", #selector(createJobPressed), filled: true)
+        newJob.frame = NSRect(x: 154, y: 12, width: 88, height: 28)
+        head.addSubview(newJob)
         let ref = btn("Refresh", #selector(refreshPressed), filled: false)
-        ref.frame = NSRect(x: 162, y: 12, width: 72, height: 28)
+        ref.frame = NSRect(x: 250, y: 12, width: 72, height: 28)
         head.addSubview(ref)
         blocks.append(head)
         total += headH + 14
@@ -443,4 +446,360 @@ final class TeamFocusController: NSObject {
     }
 
     @objc private func refreshPressed() { reload() }
+
+    /// Create a control-plane job for a worker on this team (no paste required).
+    @objc private func createJobPressed() {
+        NSApp.activate(ignoringOtherApps: true)
+        let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
+        let ws = Workers.list(from: entry)
+        guard !ws.isEmpty else {
+            let a = NSAlert()
+            a.messageText = "No workers"
+            a.informativeText = "Add a worker seat before creating a job."
+            a.runModal()
+            return
+        }
+
+        let a = NSAlert()
+        a.messageText = "New job"
+        a.informativeText = "Assign work to a worker seat. Job file is source of truth (--no-paste)."
+        let pop = NSPopUpButton(frame: NSRect(x: 0, y: 36, width: 280, height: 26), pullsDown: false)
+        for w in ws {
+            let id = (w["id"] as? String) ?? "?"
+            let lab = (w["label"] as? String) ?? id
+            pop.addItem(withTitle: "\(id) · \(lab)")
+            pop.lastItem?.representedObject = id
+        }
+        let task = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 28))
+        task.placeholderString = "Task (acceptance optional — add after first line)"
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 70))
+        box.addSubview(pop)
+        box.addSubview(task)
+        a.accessoryView = box
+        a.addButton(withTitle: "Create")
+        a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = task
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let workerId = (pop.selectedItem?.representedObject as? String) ?? "w1"
+        let body = task.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let escaped = body
+                .replacingOccurrences(of: "'", with: "'\\''")
+                .replacingOccurrences(of: "\n", with: "\\n")
+            let out = Pong.sh(
+                "export PATH=\"$HOME/bin:/opt/homebrew/bin:$PATH\"; " +
+                "export PONG_SESSION=\(self.session) HERMES_PONG_SESSION=\(self.session); " +
+                "pong job create --worker \(workerId) --no-paste --task '\(escaped)' 2>&1 | tail -5"
+            )
+            Pong.log("focus job create worker=\(workerId) out=\(out.prefix(200))")
+            DispatchQueue.main.async {
+                self.reload()
+                PanelController.shared.refreshUI()
+                let done = NSAlert()
+                done.messageText = "Job created"
+                done.informativeText = out.isEmpty
+                    ? "Assigned to \(workerId). Check Mission or 3D flow labels."
+                    : String(out.prefix(400))
+                done.runModal()
+            }
+        }
+    }
+}
+
+// MARK: - Human console (YOU cube on the map)
+
+/// Unified place to talk to orchestrators and answer “needs you” without Terminal hunting.
+final class HumanConsoleController: NSObject, NSWindowDelegate, NSTextViewDelegate {
+    static let shared = HumanConsoleController()
+
+    private var window: NSWindow?
+    private var session = ""
+    private var sessionPop: NSPopUpButton!
+    private var inboxView: NSTextView!
+    private var inputView: NSTextView!
+    private var statusLabel: NSTextField!
+    private let W: CGFloat = 520
+    private let H: CGFloat = 560
+
+    func show(session: String) {
+        self.session = session
+        if window == nil { build() }
+        reloadSessions()
+        reloadInbox()
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(inputView)
+    }
+
+    private func build() {
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: W, height: H),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        win.title = "You · Human console"
+        win.titleVisibility = .hidden
+        win.titlebarAppearsTransparent = true
+        win.isReleasedWhenClosed = false
+        win.level = .floating
+        win.backgroundColor = PongTheme.bg
+        win.minSize = NSSize(width: 420, height: 420)
+        win.setFrameAutosaveName("PongHumanConsole")
+        win.delegate = self
+
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        root.wantsLayer = true
+        root.layer?.backgroundColor = PongTheme.bg.cgColor
+        root.autoresizingMask = [.width, .height]
+
+        let title = NSTextField(labelWithString: "YOU")
+        title.font = PongTheme.font(18, weight: .bold)
+        title.textColor = PongTheme.amber
+        title.frame = NSRect(x: 20, y: H - 48, width: 80, height: 24)
+        title.autoresizingMask = [.minYMargin]
+        root.addSubview(title)
+
+        let sub = NSTextField(labelWithString: "Talk to the orchestrator · answer asks · no Terminal hunting")
+        sub.font = PongTheme.font(11)
+        sub.textColor = PongTheme.textSecondary
+        sub.frame = NSRect(x: 100, y: H - 46, width: W - 120, height: 20)
+        sub.autoresizingMask = [.minYMargin, .width]
+        root.addSubview(sub)
+
+        sessionPop = NSPopUpButton(frame: NSRect(x: 20, y: H - 82, width: min(280, W - 40), height: 26), pullsDown: false)
+        sessionPop.target = self
+        sessionPop.action = #selector(sessionChanged)
+        sessionPop.autoresizingMask = [.minYMargin]
+        root.addSubview(sessionPop)
+
+        // Inbox
+        let inLab = NSTextField(labelWithString: "FROM TEAM  ·  asks & human-needed jobs")
+        inLab.font = PongTheme.labelFont(10)
+        inLab.textColor = PongTheme.textTertiary
+        inLab.frame = NSRect(x: 20, y: H - 112, width: 300, height: 14)
+        inLab.autoresizingMask = [.minYMargin]
+        root.addSubview(inLab)
+
+        let inScroll = NSScrollView(frame: NSRect(x: 20, y: 168, width: W - 40, height: H - 290))
+        inScroll.hasVerticalScroller = true
+        inScroll.borderType = .noBorder
+        inScroll.drawsBackground = true
+        inScroll.backgroundColor = PongTheme.bgElevated
+        inScroll.autoresizingMask = [.width, .height]
+        inboxView = NSTextView(frame: inScroll.bounds)
+        inboxView.isEditable = false
+        inboxView.isSelectable = true
+        inboxView.font = PongTheme.mono(11)
+        inboxView.textColor = PongTheme.textPrimary
+        inboxView.backgroundColor = PongTheme.bgElevated
+        inboxView.textContainerInset = NSSize(width: 10, height: 10)
+        inScroll.documentView = inboxView
+        root.addSubview(inScroll)
+
+        // Compose
+        let outLab = NSTextField(labelWithString: "TO ORCHESTRATOR  ·  prompt or answer")
+        outLab.font = PongTheme.labelFont(10)
+        outLab.textColor = PongTheme.textTertiary
+        outLab.frame = NSRect(x: 20, y: 140, width: 300, height: 14)
+        outLab.autoresizingMask = [.maxYMargin]
+        root.addSubview(outLab)
+
+        let outScroll = NSScrollView(frame: NSRect(x: 20, y: 52, width: W - 40, height: 84))
+        outScroll.hasVerticalScroller = true
+        outScroll.borderType = .lineBorder
+        outScroll.drawsBackground = true
+        outScroll.backgroundColor = PongTheme.bgInput
+        outScroll.autoresizingMask = [.width, .maxYMargin]
+        inputView = NSTextView(frame: outScroll.bounds)
+        inputView.isEditable = true
+        inputView.font = PongTheme.font(12)
+        inputView.textColor = PongTheme.textPrimary
+        inputView.backgroundColor = PongTheme.bgInput
+        inputView.textContainerInset = NSSize(width: 8, height: 8)
+        inputView.delegate = self
+        outScroll.documentView = inputView
+        root.addSubview(outScroll)
+
+        let send = NSButton(title: "Send to orchestrator", target: self, action: #selector(sendPressed))
+        send.bezelStyle = .rounded
+        send.keyEquivalent = "\r"
+        send.keyEquivalentModifierMask = [.command]
+        send.frame = NSRect(x: W - 200, y: 14, width: 180, height: 28)
+        send.autoresizingMask = [.minXMargin, .maxYMargin]
+        root.addSubview(send)
+
+        let refresh = NSButton(title: "Refresh", target: self, action: #selector(refreshPressed))
+        refresh.bezelStyle = .rounded
+        refresh.frame = NSRect(x: 20, y: 14, width: 80, height: 28)
+        refresh.autoresizingMask = [.maxYMargin]
+        root.addSubview(refresh)
+
+        let openOrch = NSButton(title: "Open terminal…", target: self, action: #selector(openOrchPressed))
+        openOrch.bezelStyle = .rounded
+        openOrch.frame = NSRect(x: 108, y: 14, width: 120, height: 28)
+        openOrch.autoresizingMask = [.maxYMargin]
+        root.addSubview(openOrch)
+
+        statusLabel = NSTextField(labelWithString: "⌘↩ to send · lands in orchestrator pane + log")
+        statusLabel.font = PongTheme.font(10)
+        statusLabel.textColor = PongTheme.textTertiary
+        statusLabel.frame = NSRect(x: 240, y: 18, width: 200, height: 16)
+        statusLabel.autoresizingMask = [.maxYMargin]
+        root.addSubview(statusLabel)
+
+        win.contentView = root
+        window = win
+    }
+
+    private func reloadSessions() {
+        let pairs = PairState.listPairs()
+        sessionPop.removeAllItems()
+        for p in pairs {
+            let entry = PairState.loadPairsDb()[p] as? [String: Any] ?? [:]
+            let name = (entry["display_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? p
+            sessionPop.addItem(withTitle: name)
+            sessionPop.lastItem?.representedObject = p
+            if p == session { sessionPop.select(sessionPop.lastItem) }
+        }
+        if sessionPop.numberOfItems == 0 {
+            sessionPop.addItem(withTitle: "(no teams)")
+        }
+    }
+
+    private func reloadInbox() {
+        var lines: [String] = []
+        lines.append("Session  \(session)")
+        lines.append(String(repeating: "─", count: 48))
+
+        let snap = Pong.loadJSON(Pong.stateDir + "/snapshot.json")
+        let team = ((snap["teams"] as? [[String: Any]]) ?? []).first { ($0["session"] as? String) == session }
+        let openJobs = ((team?["jobs"] as? [String: Any])?["open"] as? [[String: Any]]) ?? []
+        let workers = (team?["workers"] as? [[String: Any]]) ?? []
+
+        var asks: [String] = []
+        for w in workers {
+            let h = ((w["status_hint"] as? String) ?? "").lowercased()
+            let id = (w["id"] as? String) ?? "?"
+            let lab = (w["label"] as? String) ?? id
+            if h.contains("human") || h.contains("takeover") || h.contains("ask") {
+                asks.append("• \(lab) (\(id)) needs you — \(w["status_hint"] as? String ?? h)")
+            }
+        }
+        for j in openJobs {
+            let st = ((j["status"] as? String) ?? "").lowercased()
+            if st.contains("human") || st.contains("ask") {
+                let prev = (j["task_preview"] as? String) ?? (j["task"] as? String) ?? (j["id"] as? String) ?? "job"
+                let wid = (j["worker"] as? String) ?? (j["worker_id"] as? String) ?? "?"
+                asks.append("• Job \(j["id"] as? String ?? "?") · \(wid) · \(st)\n  \(String(prev.prefix(160)))")
+            }
+        }
+
+        if asks.isEmpty {
+            lines.append("")
+            lines.append("No open asks. You can still send a prompt to the orchestrator below.")
+        } else {
+            lines.append("")
+            lines.append("NEEDS YOU")
+            lines.append(contentsOf: asks)
+        }
+
+        // Prior human messages
+        let log = Self.logPath(session: session)
+        if let data = try? String(contentsOfFile: log, encoding: .utf8), !data.isEmpty {
+            lines.append("")
+            lines.append("RECENT (you → orch)")
+            lines.append(String(data.suffix(1200)))
+        }
+
+        inboxView.string = lines.joined(separator: "\n")
+        statusLabel.stringValue = asks.isEmpty
+            ? "Ready · ⌘↩ send"
+            : "\(asks.count) open ask(s) · reply below"
+        statusLabel.textColor = asks.isEmpty ? PongTheme.textTertiary : PongTheme.amber
+    }
+
+    @objc private func sessionChanged() {
+        if let s = sessionPop.selectedItem?.representedObject as? String {
+            session = s
+            reloadInbox()
+        }
+    }
+
+    @objc private func refreshPressed() { reloadInbox() }
+
+    @objc private func openOrchPressed() {
+        DispatchQueue.global(qos: .userInitiated).async { Pairing.bringToFront(self.session) }
+    }
+
+    @objc private func sendPressed() {
+        let text = inputView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        guard !session.isEmpty else { return }
+
+        statusLabel.stringValue = "Sending…"
+        let payload = text
+        inputView.string = ""
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = Self.deliver(session: self.session, text: payload)
+            DispatchQueue.main.async {
+                self.statusLabel.stringValue = ok
+                    ? "Sent to orchestrator · \(Date().formatted(date: .omitted, time: .shortened))"
+                    : "Send failed — is the team session live?"
+                self.statusLabel.textColor = ok ? PongTheme.amber : PongTheme.danger
+                self.reloadInbox()
+            }
+        }
+    }
+
+    /// Paste into conductor tmux pane + append human log (unified path).
+    @discardableResult
+    static func deliver(session: String, text: String) -> Bool {
+        let header = "\n—— YOU · \(ISO8601DateFormatter().string(from: Date())) ——\n"
+        let body = header + text + "\n"
+        // Log first (source of truth for console history)
+        let path = logPath(session: session)
+        let dir = (path as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        if let h = FileHandle(forWritingAtPath: path) {
+            h.seekToEndOfFile()
+            h.write(Data(body.utf8))
+            try? h.close()
+        } else {
+            try? body.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        // Also write outbox agents can read
+        let outbox = Pong.stateDir + "/human/\(session)/outbox.md"
+        try? FileManager.default.createDirectory(
+            atPath: (outbox as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try? body.write(toFile: outbox, atomically: true, encoding: .utf8)
+
+        // Deliver into orchestrator pane (tmux :0)
+        TmuxScroll.apply(session: session)
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pong-human-\(UUID().uuidString).txt")
+        do {
+            try body.write(to: tmp, atomically: true, encoding: .utf8)
+        } catch {
+            Pong.log("human console write tmp fail: \(error)")
+            return false
+        }
+        let target = "\(session):0"
+        let q = tmp.path.replacingOccurrences(of: "'", with: "'\\''")
+        let out = Pong.sh("""
+            tmux has-session -t '\(session)' 2>/dev/null || exit 1
+            tmux load-buffer -b pong_human '\(q)' 2>/dev/null || tmux load-buffer '\(q)'
+            tmux paste-buffer -b pong_human -t '\(target)' 2>/dev/null || tmux paste-buffer -t '\(target)'
+            tmux delete-buffer -b pong_human 2>/dev/null || true
+            tmux send-keys -t '\(target)' Enter 2>/dev/null || true
+            echo OK
+            """)
+        try? FileManager.default.removeItem(at: tmp)
+        Pong.log("human console deliver session=\(session) out=\(out.prefix(80))")
+        return out.contains("OK")
+    }
+
+    static func logPath(session: String) -> String {
+        Pong.stateDir + "/human/\(session)/console.log"
+    }
 }
