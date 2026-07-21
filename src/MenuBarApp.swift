@@ -1102,24 +1102,33 @@ enum TerminalTheme {
         "pong.\(pair).\(seat)"
     }
 
-    /// Human-facing Terminal title: `Team · Seat` (not the attach-session chrome).
+    /// Human-facing Terminal title: `Team · AgentName` (never session id + model type alone).
     static func friendlySeatTitle(pair: String, seat: String, seatLabel: String? = nil) -> String {
         let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
         let team = (entry["display_name"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let teamPart = (team?.isEmpty == false) ? team! : pair
-        if let lab = seatLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !lab.isEmpty {
-            return "\(teamPart) · \(lab)"
+
+        // Prefer explicit label, then stored seat name (wizard), never bare model type if we have better
+        func clean(_ s: String?) -> String? {
+            guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+            return t
+        }
+        if let lab = clean(seatLabel) {
+            // Strip accidental "Sub · " noise for title if team already shown
+            let short = lab.hasPrefix("Sub · ") ? String(lab.dropFirst(6)) : lab
+            return "\(teamPart) · \(short)"
         }
         if seat == "c1" || seat == "hermes" {
             let cond = entry["conductor"] as? [String: Any]
-            let cl = (cond?["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let cl, !cl.isEmpty { return "\(teamPart) · \(cl)" }
+            if let cl = clean(cond?["label"] as? String) { return "\(teamPart) · \(cl)" }
             return "\(teamPart) · Orchestrator"
         }
         if let w = Workers.list(from: entry).first(where: { ($0["id"] as? String) == seat }) {
-            let lab = (w["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let lab, !lab.isEmpty { return "\(teamPart) · \(lab)" }
+            if let lab = clean(w["label"] as? String) {
+                let short = lab.hasPrefix("Sub · ") ? String(lab.dropFirst(6)) : lab
+                return "\(teamPart) · \(short)"
+            }
         }
         return "\(teamPart) · \(seat)"
     }
@@ -1298,11 +1307,16 @@ enum TerminalTheme {
             """
         }
 
+        // Prefer ASCII hyphen in the title bar — unicode middot can trip some AppleScript paths
+        let barTitle = safeTitle
+            .replacingOccurrences(of: " · ", with: " - ")
+            .replacingOccurrences(of: "·", with: "-")
         let source = """
         tell application "Terminal"
           try
             set W to window id \(wid)
             set T to selected tab of W
+            -- Only custom title: "Team - Agent" — hide path / process / attach chrome
             set title displays custom title of T to true
             set title displays device name of T to false
             set title displays shell path of T to false
@@ -1313,12 +1327,20 @@ enum TerminalTheme {
             try
               set title displays settings name of T to false
             end try
-            -- Hide "tmux attach-session …" process name in the title bar
             try
               set title displays active process name of T to false
             end try
-            set custom title of T to "\(safeTitle)"
+            set custom title of T to "\(barTitle)"
             \(colorLines)
+            -- Also stamp the settings set so process name stays off for this profile
+            try
+              set S to current settings of T
+              set title displays custom title of S to true
+              set title displays active process name of S to false
+              set title displays device name of S to false
+              set title displays shell path of S to false
+              set title displays window size of S to false
+            end try
             return "OK"
           on error errMsg
             return "ERR:" & errMsg
@@ -1326,7 +1348,28 @@ enum TerminalTheme {
         end tell
         """
         let out = Pong.appleScript(source)
-        Pong.log("theme apply window=\(wid) token=\(viewToken) title=\(displayTitle) → \(out.isEmpty ? "(empty)" : out)")
+        // Second pass: process name often reappears after tmux attaches
+        if out == "OK" || out.isEmpty || out.hasPrefix("OK") {
+            usleep(120_000)
+            _ = Pong.appleScript("""
+            tell application "Terminal"
+              try
+                set W to window id \(wid)
+                set T to selected tab of W
+                try
+                  set title displays active process name of T to false
+                end try
+                set custom title of T to "\(barTitle)"
+                try
+                  set S to current settings of T
+                  set title displays active process name of S to false
+                  set title displays custom title of S to true
+                end try
+              end try
+            end tell
+            """)
+        }
+        Pong.log("theme apply window=\(wid) token=\(viewToken) title=\(barTitle) → \(out.isEmpty ? "(empty)" : out)")
     }
 
     static func tmuxTitle(baseSession: String, tmuxIndex: Int, displayTitle: String) {
@@ -3127,6 +3170,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     )
                     usleep(300_000)
                     TeamWizardApply.apply(plan, session: name)
+                    // Second title pass after names land (attach clients may have re-added process name)
+                    usleep(400_000)
+                    TerminalTheme.applyPair(name)
                     DispatchQueue.main.async {
                         PanelController.showPairPersistTip(name)
                         completion?()
@@ -3141,6 +3187,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Quick launch
         DispatchQueue.global(qos: .userInitiated).async {
             let name = Pairing.startFresh(workers: workers, conductor: conductor)
+            usleep(400_000)
+            TerminalTheme.applyPair(name)
             DispatchQueue.main.async {
                 PanelController.showPairPersistTip(name)
                 completion?()

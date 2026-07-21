@@ -1005,6 +1005,9 @@ enum TeamWizardApply {
         if plan.writeScaffold {
             TeamScaffold.write(plan: plan, session: session)
         }
+        // Names land after Terminals open — repaint titles to Team · Agent (not pong-team · Grok Build)
+        usleep(200_000)
+        TerminalTheme.applyPair(session)
         Pong.log("wizard applied session=\(session) scaffold=\(plan.writeScaffold) edges=\(plan.flowEdges.count)")
     }
 }
