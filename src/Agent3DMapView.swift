@@ -829,11 +829,6 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
             modeButtons.append(b)
             x += w + 6
         }
-        let flip = makeEditChip(title: "Flip →", x: x, width: 64)
-        flip.toolTip = "Reverse the last link’s direction"
-        flip.action = #selector(flipLastLink)
-        editBar.addSubview(flip)
-        x += 70
         let flow = makeEditChip(title: "Architecture…", x: x, width: 108)
         flow.toolTip = "ORCH / AGENTS / SUB · link seats · who does what (same as wizard)"
         flow.action = #selector(openFlowDesign)
@@ -842,7 +837,7 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         NSLayoutConstraint.activate([
             editBar.centerXAnchor.constraint(equalTo: centerXAnchor),
             editBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -78),
-            editBar.widthAnchor.constraint(equalToConstant: 360),
+            editBar.widthAnchor.constraint(equalToConstant: 250),
             editBar.heightAnchor.constraint(equalToConstant: 40),
         ])
         styleModeButtons()
@@ -915,15 +910,6 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
                 .font: PongTheme.labelFont(10),
             ])
         }
-    }
-
-    @objc private func flipLastLink() {
-        guard let session = seats.first?.session else { return }
-        let edges = FlowGraph.load(from: PairState.loadPairsDb()[session] as? [String: Any] ?? [:])
-        guard let last = edges.last else { return }
-        FlowGraph.flipEdge(pair: session, id: last.id)
-        onGraphChanged?()
-        reload(seats: seats, multiTeam: multiTeam)
     }
 
     /// Redesign planes: 24×24, accent rim/brackets/grid, faint fill, range ring.
@@ -3037,6 +3023,8 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
                 let z = max(-lim, min(lim, world.z))
                 // Never change Y mid-drag
                 sn.position = SCNVector3(x, dragPlaneY, z)
+                // Keep flow lines glued to the moving seat (do not wait for mouse-up)
+                rebuildFlowEdgesOnly()
             }
         case .ended, .cancelled:
             if let gid = dragGid, let sn = seatNodes[gid],
@@ -3046,12 +3034,15 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
                 sn.position = SCNVector3(sn.position.x, y, sn.position.z)
                 Map3DLayout.save(session: s.session, nodeId: s.id,
                                  x: Float(sn.position.x), z: Float(sn.position.z))
+                // Ring follows the seat
+                syncPlaneRing(for: s, at: sn.position, active: isSeatActive(s), color: roleColor(s))
                 hintLabel.stringValue = "Saved position · Move mode still on"
             }
             dragGid = nil
             applyCameraMode()
-            // Light reload to refresh links without resetting camera
-            reload(seats: seats, multiTeam: multiTeam)
+            // Must rebuild edges: reload() early-outs when seat status signature is unchanged
+            rebuildFlowEdgesOnly()
+            requestMapRender()
         default: break
         }
     }
@@ -3357,83 +3348,11 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
                 }
             }
 
-            // Topology for THIS session only — endpoints must be seats we just placed
-            let seatIds = Set(team.map(\.id))
-            let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
-            let graphEdges = FlowGraph.load(from: entry).filter {
-                seatIds.contains($0.from) && seatIds.contains($0.to)
-            }
-            var pairBuckets: [String: Int] = [:]
-            func pairKey(_ a: String, _ b: String) -> String {
-                [a, b].sorted().joined(separator: "|")
-            }
-            for ge in graphEdges {
-                guard let fromSeat = team.first(where: { $0.id == ge.from }),
-                      let toSeat = team.first(where: { $0.id == ge.to }),
-                      let fn = seatNodes[fromSeat.globalId],
-                      let tn = seatNodes[toSeat.globalId] else { continue }
-                // Unified activity: same predicate as bob/ring so live seats always show packets.
-                let human = toSeat.status.lowercased().contains("human")
-                    || fromSeat.status.lowercased().contains("human")
-                let liveNow = linkHasLiveData(from: fromSeat, to: toSeat)
-                let edgeKey = "\(session)|\(ge.id)"
-                let flowing = linkFlowing(id: edgeKey, liveNow: liveNow)
-                var label = ge.label
-                if human && ge.kind == "claim" { label = "NEEDS YOU" }
-                else if flowing, !toSeat.flowHint.isEmpty, ge.kind == "delegate" {
-                    label = "\(ge.kind.uppercased()) · \(String(toSeat.flowHint.prefix(18)).uppercased())"
-                }
-                let kind: FlowLink3D.Kind = {
-                    switch ge.kind {
-                    case "peer": return .peer
-                    case "sub": return .sub
-                    case "claim", "reply": return .claim
-                    default: return .delegate
-                    }
-                }()
-                // Packets only while data is in flight (+ linger) — not permanent “busy seat”
-                let link = FlowLink3D(
-                    id: edgeKey, fromGid: fromSeat.globalId, toGid: toSeat.globalId,
-                    label: label, kind: kind, active: flowing, human: human,
-                    fromRole: fromSeat.role
-                )
-                allLinks.append(link)
-                let pk = pairKey(ge.from, ge.to)
-                let idx = pairBuckets[pk] ?? 0
-                pairBuckets[pk] = idx + 1
-                let total = graphEdges.filter { pairKey($0.from, $0.to) == pk }.count
-                let sig = edgeSignature(link: link, from: fn, to: tn, parallelIndex: idx, parallelCount: max(1, total))
-                desiredSigs[edgeKey] = sig
-                pendingEdges.append((fn, tn, link, idx, max(1, total), sig))
-            }
-
-            // Auto-link parent → ephemeral subagents (not in FlowGraph — live only)
-            for s in subs where s.ephemeral {
-                guard let pid = s.parentId,
-                      let fromSeat = team.first(where: { $0.id == pid })
-                        ?? seats.first(where: { $0.session == session && $0.id == pid }),
-                      let fn = seatNodes[fromSeat.globalId],
-                      let tn = seatNodes[s.globalId] else { continue }
-                let edgeKey = "\(session)|eph-sub:\(pid)>\(s.id)"
-                let hint = s.flowHint.isEmpty
-                    ? "SUB · SPAWN"
-                    : "SUB · \(String(s.flowHint.prefix(16)).uppercased())"
-                let liveNow = linkHasLiveData(from: fromSeat, to: s)
-                // Ephemeral alone is not enough — only flow while the sub is actually busy
-                let flowing = linkFlowing(id: edgeKey, liveNow: liveNow)
-                let link = FlowLink3D(
-                    id: edgeKey, fromGid: fromSeat.globalId, toGid: s.globalId,
-                    label: hint, kind: .sub, active: flowing, human: false,
-                    fromRole: fromSeat.role
-                )
-                allLinks.append(link)
-                let pk = pairKey(pid, s.id)
-                let idx = pairBuckets[pk] ?? 0
-                pairBuckets[pk] = idx + 1
-                let sig = edgeSignature(link: link, from: fn, to: tn, parallelIndex: idx, parallelCount: idx + 1)
-                desiredSigs[edgeKey] = sig
-                pendingEdges.append((fn, tn, link, idx, max(1, idx + 1), sig))
-            }
+            // Topology for THIS session only — endpoints use current seat node positions
+            appendSessionEdges(
+                session: session, team: team, subs: subs,
+                allLinks: &allLinks, desiredSigs: &desiredSigs, pendingEdges: &pendingEdges
+            )
         }
 
         // Single YOU cube — parked on the orchestrator the human console is wired to
@@ -3480,7 +3399,142 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
             // dropdown and rewired YOU to the wrong orchestrator every poll.
         }
 
-        // Remove edges that disappeared; rebuild only when signature (geometry/active/label) changed.
+        commitPendingEdges(desiredSigs: desiredSigs, pendingEdges: pendingEdges)
+        lastLinks = allLinks
+        refreshTrackingList()
+        reloadHumanOrchPicker()
+        if humanExpanded { reloadHumanInbox() }
+        reloadTaskRecap()
+        reloadCronTimeline()
+    }
+
+    /// Rebuild flow lines from **current** seat node positions without re-placing seats.
+    /// Used while dragging so links stay glued to the moved agent.
+    private func rebuildFlowEdgesOnly() {
+        var allLinks: [FlowLink3D] = []
+        var desiredSigs: [String: String] = [:]
+        var pendingEdges: [(from: SCNNode, to: SCNNode, link: FlowLink3D, pi: Int, pc: Int, sig: String)] = []
+        let teamSeats = seats.filter { $0.role != "human" }
+        let sessions = Array(Set(teamSeats.map(\.session))).sorted()
+        for session in sessions {
+            let team = teamSeats.filter { $0.session == session }
+            let subs = team.filter { $0.role == "subagent" }
+            appendSessionEdges(
+                session: session, team: team, subs: subs,
+                allLinks: &allLinks, desiredSigs: &desiredSigs, pendingEdges: &pendingEdges
+            )
+        }
+        // YOU ↔ orch
+        if let human = seats.first(where: { $0.role == "human" }),
+           let from = seatNodes[human.globalId] {
+            let homeSession = linkedHumanOrchSession(fallbackSeatSession: human.session)
+            let orch = seats.first(where: { $0.session == homeSession && $0.role == "conductor" })
+                ?? seats.first(where: { $0.role == "conductor" })
+            if let orch, let to = seatNodes[orch.globalId] {
+                let edgeKey = "you>\(orch.session)|\(orch.id)"
+                let need = sessionNeedsHuman(orch.session)
+                let flowing = linkFlowing(id: edgeKey, liveNow: need)
+                let link = FlowLink3D(
+                    id: edgeKey, fromGid: human.globalId, toGid: orch.globalId,
+                    label: need ? "NEEDS YOU" : "YOU",
+                    kind: .claim, active: flowing, human: true, fromRole: "human"
+                )
+                allLinks.append(link)
+                let sig = edgeSignature(link: link, from: from, to: to, parallelIndex: 0, parallelCount: 1)
+                desiredSigs[link.id] = sig
+                pendingEdges.append((from, to, link, 0, 1, sig))
+            }
+        }
+        commitPendingEdges(desiredSigs: desiredSigs, pendingEdges: pendingEdges)
+        lastLinks = allLinks
+        requestMapRender()
+    }
+
+    private func appendSessionEdges(
+        session: String,
+        team: [Seat3D],
+        subs: [Seat3D],
+        allLinks: inout [FlowLink3D],
+        desiredSigs: inout [String: String],
+        pendingEdges: inout [(from: SCNNode, to: SCNNode, link: FlowLink3D, pi: Int, pc: Int, sig: String)]
+    ) {
+        let seatIds = Set(team.map(\.id))
+        let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
+        let graphEdges = FlowGraph.load(from: entry).filter {
+            seatIds.contains($0.from) && seatIds.contains($0.to)
+        }
+        var pairBuckets: [String: Int] = [:]
+        func pairKey(_ a: String, _ b: String) -> String {
+            [a, b].sorted().joined(separator: "|")
+        }
+        for ge in graphEdges {
+            guard let fromSeat = team.first(where: { $0.id == ge.from }),
+                  let toSeat = team.first(where: { $0.id == ge.to }),
+                  let fn = seatNodes[fromSeat.globalId],
+                  let tn = seatNodes[toSeat.globalId] else { continue }
+            let human = toSeat.status.lowercased().contains("human")
+                || fromSeat.status.lowercased().contains("human")
+            let liveNow = linkHasLiveData(from: fromSeat, to: toSeat)
+            let edgeKey = "\(session)|\(ge.id)"
+            let flowing = linkFlowing(id: edgeKey, liveNow: liveNow)
+            var label = ge.label
+            if human && ge.kind == "claim" { label = "NEEDS YOU" }
+            else if flowing, !toSeat.flowHint.isEmpty, ge.kind == "delegate" {
+                label = "\(ge.kind.uppercased()) · \(String(toSeat.flowHint.prefix(18)).uppercased())"
+            }
+            let kind: FlowLink3D.Kind = {
+                switch ge.kind {
+                case "peer": return .peer
+                case "sub": return .sub
+                case "claim", "reply": return .claim
+                default: return .delegate
+                }
+            }()
+            let link = FlowLink3D(
+                id: edgeKey, fromGid: fromSeat.globalId, toGid: toSeat.globalId,
+                label: label, kind: kind, active: flowing, human: human,
+                fromRole: fromSeat.role
+            )
+            allLinks.append(link)
+            let pk = pairKey(ge.from, ge.to)
+            let idx = pairBuckets[pk] ?? 0
+            pairBuckets[pk] = idx + 1
+            let total = graphEdges.filter { pairKey($0.from, $0.to) == pk }.count
+            let sig = edgeSignature(link: link, from: fn, to: tn, parallelIndex: idx, parallelCount: max(1, total))
+            desiredSigs[edgeKey] = sig
+            pendingEdges.append((fn, tn, link, idx, max(1, total), sig))
+        }
+        for s in subs where s.ephemeral {
+            guard let pid = s.parentId,
+                  let fromSeat = team.first(where: { $0.id == pid })
+                    ?? seats.first(where: { $0.session == session && $0.id == pid }),
+                  let fn = seatNodes[fromSeat.globalId],
+                  let tn = seatNodes[s.globalId] else { continue }
+            let edgeKey = "\(session)|eph-sub:\(pid)>\(s.id)"
+            let hint = s.flowHint.isEmpty
+                ? "SUB · SPAWN"
+                : "SUB · \(String(s.flowHint.prefix(16)).uppercased())"
+            let liveNow = linkHasLiveData(from: fromSeat, to: s)
+            let flowing = linkFlowing(id: edgeKey, liveNow: liveNow)
+            let link = FlowLink3D(
+                id: edgeKey, fromGid: fromSeat.globalId, toGid: s.globalId,
+                label: hint, kind: .sub, active: flowing, human: false,
+                fromRole: fromSeat.role
+            )
+            allLinks.append(link)
+            let pk = pairKey(pid, s.id)
+            let idx = pairBuckets[pk] ?? 0
+            pairBuckets[pk] = idx + 1
+            let sig = edgeSignature(link: link, from: fn, to: tn, parallelIndex: idx, parallelCount: idx + 1)
+            desiredSigs[edgeKey] = sig
+            pendingEdges.append((fn, tn, link, idx, max(1, idx + 1), sig))
+        }
+    }
+
+    private func commitPendingEdges(
+        desiredSigs: [String: String],
+        pendingEdges: [(from: SCNNode, to: SCNNode, link: FlowLink3D, pi: Int, pc: Int, sig: String)]
+    ) {
         let desiredIds = Set(desiredSigs.keys)
         for oldId in Array(edgeSigs.keys) where !desiredIds.contains(oldId) {
             removeEdgeNodes(for: oldId)
@@ -3489,20 +3543,13 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         }
         for job in pendingEdges {
             if edgeSigs[job.link.id] == job.sig, edgeNodes[job.link.id] != nil {
-                continue // leave running packet SCNActions alone
+                continue
             }
             removeEdgeNodes(for: job.link.id)
             connect(from: job.from, to: job.to, link: job.link,
                     parallelIndex: job.pi, parallelCount: job.pc)
             edgeSigs[job.link.id] = job.sig
         }
-
-        lastLinks = allLinks
-        refreshTrackingList()
-        reloadHumanOrchPicker()
-        if humanExpanded { reloadHumanInbox() }
-        reloadTaskRecap()
-        reloadCronTimeline()
     }
 
     /// Stable signature so reload can leave unchanged edges (and their packet actions) intact.
