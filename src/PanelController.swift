@@ -590,7 +590,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         canvasToolbar.addSubview(pillButton("+", #selector(zoomInPressed)))
         canvasToolbar.addSubview(pillButton("Fit", #selector(fitPressed)))
         // Terminal attach (not map topology — that mode is “Flow” on the 3D bar)
-        canvasToolbar.addSubview(pillButton("Terminals", #selector(linkPressed)))
+        canvasToolbar.addSubview(pillButton("Link terminals", #selector(linkPressed)))
         canvasToolbar.addSubview(accentButton("New team", #selector(newTeamPressed)))
 
         canvasEmpty = emptyState(
