@@ -1,6 +1,15 @@
 import AppKit
+import QuartzCore
 
-// MARK: - Positions (keyed "session::nodeId" for multi-team, or bare id for single)
+// MARK: - Positions
+//
+// Invariants:
+// 1. Multi-team resolution always prefers `session::seatId`.
+// 2. Single-team may still use bare `seatId` inside that pair's entry.
+// 3. `canvas-all.json` stores **scoped keys only** (no bare `w1`) to avoid
+//    two teams both writing bare `w1` and stealing each other's layout.
+// 4. Pair entry still dual-writes bare + scoped for single-team fallback.
+// 5. TeamSanitizer deletes both key forms on seat remove.
 
 enum CanvasLayout {
     /// Uniform design-grid step (matches canvas dots).
@@ -8,6 +17,10 @@ enum CanvasLayout {
 
     static func key(session: String, nodeId: String, multi: Bool) -> String {
         multi ? "\(session)::\(nodeId)" : nodeId
+    }
+
+    static func scopedKey(session: String, nodeId: String) -> String {
+        "\(session)::\(nodeId)"
     }
 
     /// Snap origin to the dotted grid (top-left of module).
@@ -19,21 +32,50 @@ enum CanvasLayout {
     }
 
     static func positions(for session: String?) -> [String: CGPoint] {
-        // Merge pair-local + all-teams maps so single/multi views don't lose seats
+        // Global map is scoped-only (`session::seatId`). Bare keys pollute multi view.
         var out = loadMap(from: Pong.loadJSON(Pong.stateDir + "/canvas-all.json"))
+        let bareGlobal = out.keys.filter { !$0.contains("::") }
+        if !bareGlobal.isEmpty {
+            for k in bareGlobal { out.removeValue(forKey: k) }
+            scrubCanvasAllBareKeys()
+        }
         if let session {
             let local = loadMap(from: PairState.loadPairsDb()[session] as? [String: Any] ?? [:])
-            for (k, v) in local { out[k] = v }
+            for (k, v) in local {
+                if k.contains("::") {
+                    out[k] = v
+                } else {
+                    // Pair-local bare → also store under scoped so multi-safe if merged later
+                    out[scopedKey(session: session, nodeId: k)] = v
+                    out[k] = v // single-team origin may still read bare
+                }
+            }
         }
         return out
     }
 
-    /// Resolve a seat position from map (session-scoped key, then bare id).
+    /// Drop bare seat ids from canvas-all.json (multi-team collision source).
+    static func scrubCanvasAllBareKeys() {
+        PairWriteLock.withLock {
+            var all = Pong.loadJSON(Pong.stateDir + "/canvas-all.json")
+            var raw = all["canvas_positions"] as? [String: [String: Any]] ?? [:]
+            let before = raw.count
+            raw = raw.filter { $0.key.contains("::") }
+            guard raw.count != before else { return }
+            all["canvas_positions"] = raw
+            all["updated"] = Date().timeIntervalSince1970
+            Pong.writeJSON(Pong.stateDir + "/canvas-all.json", all)
+            Pong.log("canvas-all scrubbed bare keys \(before - raw.count)")
+        }
+    }
+
+    /// Resolve a seat position from map (session-scoped key first; bare only in single-team).
     static func origin(session: String, nodeId: String, multi: Bool, map: [String: CGPoint],
                        teamIndex: Int, role: String, workerIndex: Int, canvas: CGSize) -> CGPoint {
-        let sk = "\(session)::\(nodeId)"
+        let sk = scopedKey(session: session, nodeId: nodeId)
         if let p = map[sk] { return snap(p) }
-        if let p = map[nodeId] { return snap(p) }
+        // CRITICAL: multi view must never use bare `c1`/`w1` — every team shares those ids.
+        if !multi, let p = map[nodeId] { return snap(p) }
         return snap(defaultPosition(teamIndex: teamIndex, role: role, workerIndex: workerIndex, canvas: canvas, multi: multi))
     }
 
@@ -48,31 +90,34 @@ enum CanvasLayout {
         return out
     }
 
-    /// Persist one seat: write both bare + session::id keys into pair file and canvas-all.
+    /// Persist one seat: pair entry dual-writes bare + scoped; canvas-all is scoped-only.
     static func saveSeat(session: String, nodeId: String, origin: CGPoint) {
         let snapped = snap(origin)
         let bare = nodeId
-        let scoped = "\(session)::\(nodeId)"
+        let scoped = scopedKey(session: session, nodeId: nodeId)
+        let point: [String: Any] = ["x": Double(snapped.x), "y": Double(snapped.y)]
 
-        func merge(_ entry: [String: Any]) -> [String: Any] {
-            var e = entry
-            var raw = e["canvas_positions"] as? [String: [String: Any]] ?? [:]
-            raw[bare] = ["x": Double(snapped.x), "y": Double(snapped.y)]
-            raw[scoped] = ["x": Double(snapped.x), "y": Double(snapped.y)]
-            e["canvas_positions"] = raw
-            e["updated"] = Date().timeIntervalSince1970
-            return e
+        PairWriteLock.withLock {
+            var db = PairState.loadPairsDb()
+            var entry = db[session] as? [String: Any] ?? [:]
+            var local = entry["canvas_positions"] as? [String: [String: Any]] ?? [:]
+            local[bare] = point
+            local[scoped] = point
+            entry["canvas_positions"] = local
+            entry["updated"] = Date().timeIntervalSince1970
+            db[session] = entry
+            Pong.writeJSON(PairState.pairsPath, db)
+
+            var all = Pong.loadJSON(Pong.stateDir + "/canvas-all.json")
+            var raw = all["canvas_positions"] as? [String: [String: Any]] ?? [:]
+            // Scoped only in global map — prevents w1 from team A overwriting team B
+            raw[scoped] = point
+            // Never keep bare keys in canvas-all
+            raw = raw.filter { $0.key.contains("::") }
+            all["canvas_positions"] = raw
+            all["updated"] = Date().timeIntervalSince1970
+            Pong.writeJSON(Pong.stateDir + "/canvas-all.json", all)
         }
-
-        var db = PairState.loadPairsDb()
-        var entry = db[session] as? [String: Any] ?? [:]
-        entry = merge(entry)
-        db[session] = entry
-        Pong.writeJSON(PairState.pairsPath, db)
-
-        var all = Pong.loadJSON(Pong.stateDir + "/canvas-all.json")
-        all = merge(all)
-        Pong.writeJSON(Pong.stateDir + "/canvas-all.json", all)
     }
 
     static func save(session: String?, positions: [String: CGPoint], multi: Bool) {
@@ -82,26 +127,274 @@ enum CanvasLayout {
             raw[k] = ["x": Double(s.x), "y": Double(s.y)]
         }
         if multi || session == nil {
-            Pong.writeJSON(Pong.stateDir + "/canvas-all.json", ["canvas_positions": raw, "updated": Date().timeIntervalSince1970])
+            // canvas-all is always scoped-only
+            let cleaned = raw.filter { $0.key.contains("::") }
+            Pong.writeJSON(
+                Pong.stateDir + "/canvas-all.json",
+                ["canvas_positions": cleaned, "updated": Date().timeIntervalSince1970]
+            )
             return
         }
         guard let session else { return }
-        var db = PairState.loadPairsDb()
-        var entry = db[session] as? [String: Any] ?? [:]
-        entry["canvas_positions"] = raw
-        entry["updated"] = Date().timeIntervalSince1970
-        db[session] = entry
-        Pong.writeJSON(PairState.pairsPath, db)
+        PairWriteLock.withLock {
+            var db = PairState.loadPairsDb()
+            var entry = db[session] as? [String: Any] ?? [:]
+            entry["canvas_positions"] = raw
+            entry["updated"] = Date().timeIntervalSince1970
+            db[session] = entry
+            Pong.writeJSON(PairState.pairsPath, db)
+        }
     }
 
-    /// Cluster layout: each team gets a horizontal band (grid-aligned).
+    /// Comfortable workplace: room to pan; grows when seats approach edges.
+    static let minCanvas = NSSize(width: 2400, height: 1800)
+    static let maxCanvas = NSSize(width: 8000, height: 6000)
+    /// Padding around seat cluster when sizing the document.
+    static let workplacePad: CGFloat = 640
+    /// Clear of left HUD (Tracking / YOU) on first layout.
+    static let hudClearX: CGFloat = 360
+    static let hudClearY: CGFloat = 280
+    /// Multi-team grid pitch. Orch card ~200 wide + workers at +300 → right edge ~500;
+    /// pitch must clear that plus margin so adjacent clusters never collide.
+    static let multiPitchX: CGFloat = 1200
+    static let multiPitchY: CGFloat = 720
+    static let multiCols: Int = 3
+
+    /// Tight cluster — fixed coords, never scaled to canvas size.
+    /// Multi: grid of clusters (columns × rows). Single: clear of left HUD.
     static func defaultPosition(teamIndex: Int, role: String, workerIndex: Int, canvas: CGSize, multi: Bool) -> CGPoint {
-        let clusterX = multi ? 40 + CGFloat(teamIndex) * 520 : max(48, canvas.width * 0.14)
-        let clusterY = multi ? max(80, canvas.height * 0.35) : max(100, canvas.height * 0.42)
+        _ = canvas
+        let clusterX: CGFloat
+        let clusterY: CGFloat
+        if multi {
+            let col = teamIndex % multiCols
+            let row = teamIndex / multiCols
+            clusterX = hudClearX + CGFloat(col) * multiPitchX
+            clusterY = hudClearY + CGFloat(row) * multiPitchY
+        } else {
+            clusterX = hudClearX
+            clusterY = hudClearY
+        }
         if role == "conductor" {
             return snap(CGPoint(x: clusterX, y: clusterY))
         }
-        return snap(CGPoint(x: clusterX + 300, y: max(50, clusterY - 40) + CGFloat(workerIndex) * 160))
+        // Workers sit in a compact column to the right of the boss
+        return snap(CGPoint(
+            x: clusterX + 300,
+            y: clusterY - 20 + CGFloat(workerIndex) * 150
+        ))
+    }
+
+    /// Document size that fits seats + pan room (clamped).
+    static func workplaceSize(fitting nodes: [CGPoint], card: NSSize = NSSize(width: 200, height: 120)) -> NSSize {
+        guard !nodes.isEmpty else { return minCanvas }
+        var maxX = -CGFloat.greatestFiniteMagnitude
+        var maxY = -CGFloat.greatestFiniteMagnitude
+        for p in nodes {
+            maxX = max(maxX, p.x + card.width)
+            maxY = max(maxY, p.y + card.height)
+        }
+        let w = max(minCanvas.width, min(maxCanvas.width, maxX + workplacePad))
+        let h = max(minCanvas.height, min(maxCanvas.height, maxY + workplacePad))
+        return NSSize(width: w, height: h)
+    }
+
+    /// Grow document so `frame` (seat rect) has pan room; returns new size if expanded.
+    @discardableResult
+    static func expandSize(_ current: NSSize, toFit origin: CGPoint, card: NSSize) -> NSSize {
+        let needW = origin.x + card.width + workplacePad
+        let needH = origin.y + card.height + workplacePad
+        return NSSize(
+            width: min(maxCanvas.width, max(current.width, needW, minCanvas.width)),
+            height: min(maxCanvas.height, max(current.height, needH, minCanvas.height))
+        )
+    }
+
+    /// Multi-team: if conductors are stacked / missing scoped slots, re-slot those teams.
+    /// Preserves relative offsets within a team when a conductor anchor exists.
+    @discardableResult
+    static func unstackOverlappingTeams(_ points: inout [String: CGPoint], sessions: [String]) -> Bool {
+        guard sessions.count >= 2 else { return false }
+        // Drop bare keys from the working map (multi-safe)
+        for k in points.keys.filter({ !$0.contains("::") }) {
+            points.removeValue(forKey: k)
+        }
+
+        func condKey(session: String) -> String? {
+            let c1 = scopedKey(session: session, nodeId: "c1")
+            if points[c1] != nil { return c1 }
+            let prefix = session + "::"
+            return points.keys.first { key in
+                guard key.hasPrefix(prefix) else { return false }
+                let id = String(key.dropFirst(prefix.count))
+                return (id == "c1" || id.hasPrefix("c")) && !id.hasPrefix("w")
+            }
+        }
+
+        var conds: [String: CGPoint] = [:]
+        var missing: Set<String> = []
+        for sess in sessions {
+            if let k = condKey(session: sess), let p = points[k] {
+                conds[sess] = p
+            } else {
+                missing.insert(sess)
+            }
+        }
+
+        var stacked: Set<String> = missing
+        let list = sessions.filter { conds[$0] != nil }
+        for i in 0..<list.count {
+            for j in (i + 1)..<list.count {
+                let a = conds[list[i]]!
+                let b = conds[list[j]]!
+                if hypot(a.x - b.x, a.y - b.y) < 220 {
+                    stacked.insert(list[i])
+                    stacked.insert(list[j])
+                }
+            }
+        }
+        guard !stacked.isEmpty else { return false }
+
+        var changed = false
+        for (ti, sess) in sessions.enumerated() {
+            guard stacked.contains(sess) else { continue }
+            let prefix = sess + "::"
+            let teamKeys = points.filter { $0.key.hasPrefix(prefix) }
+            let newCond = defaultPosition(teamIndex: ti, role: "conductor", workerIndex: 0, canvas: minCanvas, multi: true)
+            if let oldCond = conds[sess], teamKeys.count >= 1 {
+                let dx = newCond.x - oldCond.x
+                let dy = newCond.y - oldCond.y
+                if abs(dx) < 1, abs(dy) < 1, missing.contains(sess) == false { continue }
+                for (k, p) in teamKeys {
+                    points[k] = snap(CGPoint(x: p.x + dx, y: p.y + dy))
+                }
+                // Ensure conductor key exists
+                points[scopedKey(session: sess, nodeId: "c1")] = newCond
+                changed = true
+            } else {
+                // Full re-default for this team’s known seats
+                points[scopedKey(session: sess, nodeId: "c1")] = newCond
+                var wi = 0
+                for k in teamKeys.keys.sorted() {
+                    let id = String(k.dropFirst(prefix.count))
+                    if id == "c1" || ((id.hasPrefix("c") || id == "hermes") && !id.hasPrefix("w")) {
+                        points[k] = newCond
+                        continue
+                    }
+                    points[k] = defaultPosition(teamIndex: ti, role: "worker", workerIndex: wi, canvas: minCanvas, multi: true)
+                    wi += 1
+                }
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    /// Force multi default grid for every team from the **live pair roster**.
+    /// Does not preserve relative offsets (those keep stacked seats stacked).
+    /// Places conductor + each worker at `defaultPosition` for team index `ti`.
+    @discardableResult
+    static func arrangeTeams(_ points: inout [String: CGPoint], sessions: [String]) -> Bool {
+        // Multi map is scoped-only
+        for k in points.keys.filter({ !$0.contains("::") }) {
+            points.removeValue(forKey: k)
+        }
+        guard !sessions.isEmpty else { return false }
+
+        var changed = false
+        func set(_ key: String, _ p: CGPoint) {
+            let s = snap(p)
+            if let old = points[key], hypot(old.x - s.x, old.y - s.y) < 1 { return }
+            points[key] = s
+            changed = true
+        }
+
+        for (ti, sess) in sessions.enumerated() {
+            let entry = PairState.loadPairsDb()[sess] as? [String: Any] ?? [:]
+            let condId = ((entry["conductor"] as? [String: Any])?["id"] as? String) ?? "c1"
+            let newCond = defaultPosition(teamIndex: ti, role: "conductor", workerIndex: 0, canvas: minCanvas, multi: true)
+            set(scopedKey(session: sess, nodeId: condId), newCond)
+            if condId != "c1" {
+                set(scopedKey(session: sess, nodeId: "c1"), newCond)
+            }
+
+            let workers = Workers.list(from: entry)
+            var knownIds: Set<String> = [condId, "c1"]
+            for (i, w) in workers.enumerated() {
+                let wid = (w["id"] as? String) ?? "w\(i + 1)"
+                knownIds.insert(wid)
+                let p = defaultPosition(teamIndex: ti, role: "worker", workerIndex: i, canvas: minCanvas, multi: true)
+                set(scopedKey(session: sess, nodeId: wid), p)
+            }
+
+            // Re-slot any leftover scoped seats for this session (subagents, legacy ids)
+            let prefix = sess + "::"
+            var extraWi = workers.count
+            for k in points.keys.filter({ $0.hasPrefix(prefix) }).sorted() {
+                let id = String(k.dropFirst(prefix.count))
+                if knownIds.contains(id) { continue }
+                if id == "add" || id.hasPrefix("add") {
+                    set(k, CGPoint(x: newCond.x + 200, y: newCond.y + 40))
+                    continue
+                }
+                if (id.hasPrefix("c") || id == "hermes") && !id.hasPrefix("w") {
+                    set(k, newCond)
+                    continue
+                }
+                set(k, defaultPosition(teamIndex: ti, role: "worker", workerIndex: extraWi, canvas: minCanvas, multi: true))
+                extraWi += 1
+            }
+        }
+        return changed
+    }
+
+    /// If seats got scattered across an old huge canvas, pull them into a tight cluster.
+    /// **Single-team only** — multi span is intentionally large.
+    static func compactIfSpread(_ points: inout [String: CGPoint], multi: Bool) -> Bool {
+        if multi { return false }
+        let seats = points.filter { !$0.key.hasSuffix("::add") && !$0.key.hasSuffix("add") && !$0.key.contains("add-sub") }
+        guard seats.count >= 2 else { return false }
+        let xs = seats.values.map(\.x)
+        let ys = seats.values.map(\.y)
+        let spanX = (xs.max() ?? 0) - (xs.min() ?? 0)
+        let spanY = (ys.max() ?? 0) - (ys.min() ?? 0)
+        // Only truly pathological void scatter (user drag can exceed old 1100 threshold)
+        guard spanX > 5000 || spanY > 4000 else { return false }
+        var bySession: [String: [(id: String, role: String)]] = [:]
+        for key in seats.keys {
+            let parts = key.components(separatedBy: "::")
+            let session: String
+            let id: String
+            if parts.count >= 2 {
+                session = parts[0]; id = parts[1]
+            } else {
+                session = "_"; id = key
+            }
+            let role = (id == "c1" || id.hasPrefix("c")) && !id.hasPrefix("w") ? "conductor" : "worker"
+            bySession[session, default: []].append((id, role))
+        }
+        let sessions = bySession.keys.sorted()
+        var out: [String: CGPoint] = [:]
+        for (ti, sess) in sessions.enumerated() {
+            let members = bySession[sess] ?? []
+            var wi = 0
+            for m in members.sorted(by: { a, b in
+                if a.role == "conductor" { return true }
+                if b.role == "conductor" { return false }
+                return a.id < b.id
+            }) {
+                let role = m.role
+                let idx = role == "conductor" ? 0 : wi
+                if role != "conductor" { wi += 1 }
+                let p = defaultPosition(teamIndex: ti, role: role, workerIndex: idx, canvas: minCanvas, multi: false)
+                let bare = m.id
+                let scoped = sess == "_" ? bare : "\(sess)::\(bare)"
+                out[scoped] = p
+                out[bare] = p
+            }
+        }
+        for (k, v) in out { points[k] = v }
+        return true
     }
 }
 
@@ -111,7 +404,7 @@ struct AgentNodeModel {
     let session: String
     let id: String          // local: c1, w1
     var globalId: String { "\(session)::\(id)" }
-    let role: String        // conductor | worker | add
+    let role: String        // conductor | worker | add | subagent
     let title: String
     let subtitle: String
     let detail: String
@@ -119,6 +412,24 @@ struct AgentNodeModel {
     let teamLabel: String
     let accent: NSColor
     var origin: CGPoint
+    /// Parity with Seat3D (shared HUD / panels)
+    var parentId: String? = nil
+    var openJobs: Int = 0
+    var flowHint: String = ""
+    var missionRole: String = "coder"
+
+    init(
+        session: String, id: String, role: String, title: String, subtitle: String,
+        detail: String, status: String, teamLabel: String, accent: NSColor, origin: CGPoint,
+        parentId: String? = nil, openJobs: Int = 0, flowHint: String = "", missionRole: String = "coder"
+    ) {
+        self.session = session; self.id = id; self.role = role
+        self.title = title; self.subtitle = subtitle; self.detail = detail
+        self.status = status; self.teamLabel = teamLabel; self.accent = accent
+        self.origin = origin
+        self.parentId = parentId; self.openJobs = openJobs
+        self.flowHint = flowHint; self.missionRole = missionRole
+    }
 }
 
 // MARK: - Node card
@@ -130,9 +441,13 @@ final class AgentNodeView: NSView {
     var onKill: ((AgentNodeModel) -> Void)?
     var onOptions: ((AgentNodeModel) -> Void)?
     var onPerms: ((AgentNodeModel) -> Void)?
+    var onChangeModel: ((AgentNodeModel) -> Void)?
     var onFocus: ((AgentNodeModel) -> Void)?
     var onAddWorker: ((AgentNodeModel) -> Void)?
+    var onAddSub: ((AgentNodeModel) -> Void)?
+    var onHuman: ((AgentNodeModel) -> Void)?
     var onRename: ((AgentNodeModel) -> Void)?
+    var onHover: ((AgentNodeModel?) -> Void)?
     var onDragBegan: (() -> Void)?
     var onDragEnded: (() -> Void)?
 
@@ -149,6 +464,8 @@ final class AgentNodeView: NSView {
     private let idField = NSTextField(labelWithString: "")
     private let statusPill = NSView()
     private let statusLabel = NSTextField(labelWithString: "")
+    /// Glowing activity dot — on when `SeatActivity.isActivelyWorking` (matches 3D).
+    private let workingDot = NSView()
     private var buttons: [NSButton] = []
     private let actionBar = NSView()
     /// Job highlight (Mission/job → canvas link)
@@ -157,7 +474,7 @@ final class AgentNodeView: NSView {
     }
 
     /// Lattice-style floating module — cleaner, taller type, less chrome
-    static let size = NSSize(width: 280, height: 152)
+    static let size = NSSize(width: 300, height: 152)
     /// Larger card when opened from the 3D map click
     static let moduleSize = NSSize(width: 380, height: 210)
     static let addSize = NSSize(width: 28, height: 28)
@@ -186,10 +503,16 @@ final class AgentNodeView: NSView {
         apply(model)
         toolTip = isAddChip
             ? "Add worker to this conductor"
-            : "Drag to move · Open for terminal · Edit to rename"
+            : "Drag to move · Open for terminal · Pencil to rename"
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        guard !isAddChip else { return }
+        layoutCardChrome()
+    }
 
     private func buildAddStyle() {
         // + chip docks on orchestrator → white line work shell
@@ -234,9 +557,9 @@ final class AgentNodeView: NSView {
         labelStyle(idField)
         addSubview(idField)
 
-        teamField.font = PongTheme.labelFont(9)
-        teamField.textColor = PongTheme.textTertiary
-        teamField.frame = NSRect(x: 90, y: Self.size.height - 20, width: 100, height: 12)
+        teamField.font = PongTheme.labelFont(10)
+        teamField.textColor = PongTheme.textSecondary
+        teamField.frame = NSRect(x: 14, y: Self.size.height - 20, width: Self.size.width - 90, height: 12)
         labelStyle(teamField)
         addSubview(teamField)
 
@@ -249,6 +572,15 @@ final class AgentNodeView: NSView {
         statusLabel.frame = NSRect(x: 0, y: 1, width: 58, height: 14)
         labelStyle(statusLabel)
         statusPill.addSubview(statusLabel)
+
+        // Working glow (top-right of card, left of status pill)
+        workingDot.wantsLayer = true
+        workingDot.frame = NSRect(x: Self.size.width - 88, y: Self.size.height - 22, width: 10, height: 10)
+        workingDot.layer?.cornerRadius = 5
+        workingDot.layer?.backgroundColor = NSColor.clear.cgColor
+        workingDot.isHidden = true
+        workingDot.toolTip = "Working — job handoff in flight"
+        addSubview(workingDot)
 
         iconBadge.frame = NSRect(x: 14, y: Self.size.height - 52, width: 24, height: 24)
         iconBadge.wantsLayer = true
@@ -280,29 +612,44 @@ final class AgentNodeView: NSView {
 
         titleField.font = PongTheme.font(14, weight: .semibold)
         titleField.textColor = PongTheme.textPrimary
-        // Leave room for Edit next to name
-        titleField.frame = NSRect(x: 46, y: Self.size.height - 50, width: Self.size.width - 175, height: 20)
         titleField.lineBreakMode = .byTruncatingTail
         labelStyle(titleField)
         addSubview(titleField)
 
-        let editBtn = makeBtn("Edit", #selector(renameTap), style: .secondary,
-                              frame: NSRect(x: Self.size.width - 120, y: Self.size.height - 50, width: 44, height: 20))
-        editBtn.toolTip = "Rename this seat"
-        editBtn.identifier = NSUserInterfaceItemIdentifier("editName")
-        addSubview(editBtn)
-        buttons.append(editBtn)
+        // Pencil rename control (icon only — text "Edit" was easy to miss and hit-test broken)
+        let pencil = NSButton(frame: .zero)
+        pencil.bezelStyle = .inline
+        pencil.isBordered = false
+        pencil.setButtonType(.momentaryChange)
+        pencil.wantsLayer = true
+        pencil.layer?.cornerRadius = 4
+        pencil.layer?.backgroundColor = NSColor.clear.cgColor
+        pencil.toolTip = "Rename this seat"
+        pencil.identifier = NSUserInterfaceItemIdentifier("editName")
+        pencil.target = self
+        pencil.action = #selector(renameTap)
+        if #available(macOS 11.0, *) {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+            pencil.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: "Rename")?
+                .withSymbolConfiguration(cfg)
+            pencil.imagePosition = .imageOnly
+            pencil.contentTintColor = PongTheme.textSecondary
+        } else {
+            pencil.title = "✎"
+            pencil.font = PongTheme.font(13, weight: .medium)
+            pencil.contentTintColor = PongTheme.textSecondary
+        }
+        addSubview(pencil)
+        buttons.append(pencil)
 
         subField.font = PongTheme.font(11)
         subField.textColor = PongTheme.textSecondary
-        subField.frame = NSRect(x: 46, y: Self.size.height - 68, width: Self.size.width - 60, height: 14)
         subField.lineBreakMode = .byTruncatingTail
         labelStyle(subField)
         addSubview(subField)
 
         detailField.font = PongTheme.font(11)
         detailField.textColor = PongTheme.textTertiary
-        detailField.frame = NSRect(x: 14, y: 42, width: Self.size.width - 28, height: 28)
         detailField.maximumNumberOfLines = 2
         detailField.lineBreakMode = .byWordWrapping
         detailField.cell?.truncatesLastVisibleLine = true
@@ -310,14 +657,12 @@ final class AgentNodeView: NSView {
         labelStyle(detailField)
         addSubview(detailField)
 
-        actionBar.frame = NSRect(x: 10, y: 8, width: Self.size.width - 20, height: 30)
         actionBar.wantsLayer = true
         actionBar.layer?.backgroundColor = NSColor.clear.cgColor
         addSubview(actionBar)
 
-        let barW = Self.size.width - 20
         let kill = makeBtn("Kill", #selector(killTap), style: .danger,
-                           frame: NSRect(x: barW - 48, y: 4, width: 48, height: 22))
+                           frame: NSRect(x: 0, y: 4, width: 48, height: 22))
         actionBar.addSubview(kill)
         buttons.append(kill)
 
@@ -328,12 +673,78 @@ final class AgentNodeView: NSView {
             buttons.append(b)
             x += w + 6
         }
-        addLeft("Open", #selector(frontTap), style: .primary, w: 56)
+        addLeft("Open", #selector(frontTap), style: .primary, w: 48)
         if model.role == "conductor" {
-            // Task recap lives in the map’s TASKS panel under YOU (not a Focus popup).
-            addLeft("Opts", #selector(optsTap), style: .secondary, w: 48)
+            addLeft("Opts", #selector(optsTap), style: .secondary, w: 44)
+            addLeft("You", #selector(humanTap), style: .secondary, w: 36)
         } else {
-            addLeft("Policy", #selector(permsTap), style: .secondary, w: 54)
+            addLeft("Policy", #selector(permsTap), style: .secondary, w: 48)
+            addLeft("CLI", #selector(modelTap), style: .secondary, w: 36)
+            if model.role != "subagent", model.parentId == nil {
+                addLeft("+sub", #selector(addSubTap), style: .secondary, w: 40)
+            }
+        }
+
+        layoutCardChrome()
+    }
+
+    /// Reposition title / pencil / chrome for both canvas size and expanded map module card.
+    private func layoutCardChrome() {
+        guard !isAddChip else { return }
+        let w = bounds.width
+        let h = bounds.height
+        accentRail.frame = NSRect(x: 0, y: 0, width: 2, height: h)
+        // Team name always on conductor (single + multi); workers keep optional team chip
+        let rawTeam = model.teamLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let teamName = rawTeam.isEmpty && model.role == "conductor" ? model.session : rawTeam
+        let hasTeam = !teamName.isEmpty
+        let teamOnTop = model.role == "conductor" && hasTeam
+        if teamOnTop {
+            teamField.isHidden = false
+            teamField.stringValue = "TEAM · \(teamName)"
+            teamField.font = PongTheme.mono(10, weight: .semibold)
+            teamField.textColor = model.accent
+            teamField.frame = NSRect(x: 14, y: h - 18, width: max(60, w - 90), height: 12)
+            idField.frame = NSRect(x: 14, y: h - 32, width: 80, height: 10)
+            idField.font = PongTheme.labelFont(8)
+        } else {
+            teamField.isHidden = !hasTeam
+            if hasTeam {
+                teamField.stringValue = teamName
+                teamField.font = PongTheme.labelFont(10)
+                teamField.textColor = PongTheme.textSecondary
+                teamField.frame = NSRect(x: 90, y: h - 20, width: max(60, w - 180), height: 12)
+            }
+            idField.frame = NSRect(x: 14, y: h - 20, width: 80, height: 12)
+            idField.font = PongTheme.labelFont(9)
+        }
+        statusPill.frame = NSRect(x: w - 72, y: h - 24, width: 58, height: 16)
+        workingDot.frame = NSRect(x: w - 88, y: h - 22, width: 10, height: 10)
+        let iconY = teamOnTop ? h - 64 : h - 52
+        iconBadge.frame = NSRect(x: 14, y: iconY, width: 24, height: 24)
+
+        let pencilSize: CGFloat = 22
+        let pencilX = w - pencilSize - 14
+        let titleY = teamOnTop ? h - 62 : h - 50
+        if let pencil = subviews.first(where: { $0.identifier?.rawValue == "editName" }) {
+            pencil.frame = NSRect(x: pencilX, y: titleY - 1, width: pencilSize, height: pencilSize)
+        }
+        // Title leaves room for pencil on the right
+        titleField.frame = NSRect(x: 46, y: titleY, width: max(60, pencilX - 52), height: 20)
+        subField.frame = NSRect(x: 46, y: titleY - 18, width: max(60, w - 60), height: 14)
+
+        let detailTop = titleY - 28
+        let detailH = max(28, detailTop - 42)
+        detailField.frame = NSRect(x: 14, y: 42, width: max(60, w - 28), height: detailH)
+
+        let barW = w - 20
+        actionBar.frame = NSRect(x: 10, y: 8, width: barW, height: 30)
+        // Kill stays right-aligned in the bar
+        for b in actionBar.subviews.compactMap({ $0 as? NSButton }) {
+            let label = b.attributedTitle.string.isEmpty ? b.title : b.attributedTitle.string
+            if label == "Kill" {
+                b.frame = NSRect(x: barW - 48, y: 4, width: 48, height: 22)
+            }
         }
     }
 
@@ -355,8 +766,8 @@ final class AgentNodeView: NSView {
         b.layer?.cornerRadius = PongTheme.radiusBtn
         b.layer?.masksToBounds = true
         let font = PongTheme.labelFont(10)
-        // Primary uses role color: blue conductor · magenta worker
-        let roleColor = model.role == "conductor" ? PongTheme.blue : PongTheme.magenta
+        // Primary uses seat neon accent when set (else role default via model.accent)
+        let roleColor = model.accent
         switch style {
         case .primary:
             b.layer?.backgroundColor = roleColor.cgColor
@@ -384,6 +795,8 @@ final class AgentNodeView: NSView {
             b.toolTip = model.role == "conductor" ? "Kill entire team" : "Remove this seat"
         } else if title == "Policy" {
             b.toolTip = "Session access policy for this seat"
+        } else if title == "CLI" {
+            b.toolTip = "Switch this seat’s AI / CLI model"
         } else {
             b.toolTip = title
         }
@@ -410,19 +823,24 @@ final class AgentNodeView: NSView {
 
         let isCond = m.role == "conductor"
         let human = m.status.lowercased().contains("human")
-        // Role color only: blue orchestrator · magenta agents
-        let role: NSColor = isCond ? PongTheme.blue : PongTheme.magenta
+        // Snapshot sets accent from neon catalog highlight (or role default)
+        let role: NSColor = human ? PongTheme.amber : m.accent
 
         accentRail.layer?.backgroundColor = role.cgColor
 
         titleField.stringValue = m.title
         subField.stringValue = m.subtitle
         detailField.stringValue = m.detail
-        teamField.stringValue = m.teamLabel
+        // teamField final layout in layoutCardChrome (conductor always TEAM · name)
+        let team = m.teamLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let teamShown = team.isEmpty && m.role == "conductor" ? m.session : team
+        teamField.stringValue = m.role == "conductor" && !teamShown.isEmpty
+            ? "TEAM · \(teamShown)" : teamShown
         idField.stringValue = m.id.uppercased()
+        layoutCardChrome()
         iconLabel.stringValue = isCond ? "◎" : "{}"
         iconLabel.textColor = role
-        iconBadge.layer?.backgroundColor = (isCond ? PongTheme.blueSoft : PongTheme.magentaSoft).cgColor
+        iconBadge.layer?.backgroundColor = role.withAlphaComponent(0.16).cgColor
         iconBadge.layer?.borderColor = role.withAlphaComponent(0.55).cgColor
         if #available(macOS 11.0, *) {
             for sub in iconBadge.subviews {
@@ -477,7 +895,50 @@ final class AgentNodeView: NSView {
             statusLabel.textColor = sk.color
             statusPill.layer?.backgroundColor = sk.soft.cgColor
         }
+
+        // Glowing activity dot — same rule as 3D packets / seat pulse
+        let working = SeatActivity.isActivelyWorking(status: m.status, role: m.role)
+        updateWorkingGlow(active: working, human: human, roleColor: role)
         needsDisplay = true
+    }
+
+    private func updateWorkingGlow(active: Bool, human: Bool, roleColor: NSColor) {
+        workingDot.layer?.removeAnimation(forKey: "pulse")
+        layer?.removeAnimation(forKey: "halo")
+        guard active else {
+            workingDot.isHidden = true
+            workingDot.layer?.backgroundColor = NSColor.clear.cgColor
+            workingDot.layer?.shadowOpacity = 0
+            // Calm border/shadow when idle
+            return
+        }
+        workingDot.isHidden = false
+        let glow = human ? PongTheme.amber : roleColor
+        workingDot.layer?.backgroundColor = glow.cgColor
+        workingDot.layer?.shadowColor = glow.cgColor
+        workingDot.layer?.shadowOffset = .zero
+        workingDot.layer?.shadowRadius = 8
+        workingDot.layer?.shadowOpacity = 0.95
+        // Card halo — stronger presence when working (3D ring parity)
+        layer?.shadowColor = glow.cgColor
+        layer?.shadowOpacity = 0.55
+        layer?.shadowRadius = 22
+        layer?.shadowOffset = .zero
+        let anim = CABasicAnimation(keyPath: "opacity")
+        anim.fromValue = 0.45
+        anim.toValue = 1.0
+        anim.duration = 0.7
+        anim.autoreverses = true
+        anim.repeatCount = .infinity
+        anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        workingDot.layer?.add(anim, forKey: "pulse")
+        let halo = CABasicAnimation(keyPath: "shadowOpacity")
+        halo.fromValue = 0.28
+        halo.toValue = 0.7
+        halo.duration = 0.85
+        halo.autoreverses = true
+        halo.repeatCount = .infinity
+        layer?.add(halo, forKey: "halo")
     }
 
     @objc private func frontTap() {
@@ -486,16 +947,24 @@ final class AgentNodeView: NSView {
     }
     @objc private func optsTap() { onOptions?(model) }
     @objc private func permsTap() { onPerms?(model) }
+    @objc private func modelTap() { onChangeModel?(model) }
     @objc private func focusTap() { onFocus?(model) }
+    @objc private func humanTap() { onHuman?(model) }
+    @objc private func addSubTap() { onAddSub?(model) }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         // point is in the receiver's superview coordinates
         guard !isHidden, frame.contains(point) else { return nil }
         let local = convert(point, from: superview)
+        // Pencil rename (sibling of card, not in action bar)
+        if let edit = subviews.first(where: { $0.identifier?.rawValue == "editName" }),
+           edit.frame.insetBy(dx: -4, dy: -4).contains(local) {
+            return edit
+        }
         // Prefer action-bar buttons so Open/Opts receive the click (not drag)
         if actionBar.frame.contains(local) {
             let inBar = actionBar.convert(local, from: self)
-            for b in buttons where b.frame.contains(inBar) {
+            for b in actionBar.subviews.compactMap({ $0 as? NSButton }) where b.frame.contains(inBar) {
                 return b
             }
             // Click on bar chrome still shouldn't start a drag — handle Open if near it
@@ -511,11 +980,17 @@ final class AgentNodeView: NSView {
         }
         (superview as? AgentCanvasView)?.select(globalId: model.globalId)
         let local = convert(event.locationInWindow, from: nil)
-        // Buttons (Open / Edit…) — if hitTest missed them, fire Open manually when
+        // Pencil → rename immediately (custom hitTest can miss when card is over SceneKit)
+        if let edit = subviews.first(where: { $0.identifier?.rawValue == "editName" }),
+           edit.frame.insetBy(dx: -6, dy: -6).contains(local) {
+            renameTap()
+            return
+        }
+        // Buttons (Open / Kill…) — if hitTest missed them, fire manually when
         // the primary left segment is clicked (module card over SceneKit is finicky).
         if actionBar.frame.contains(local) {
             let inBar = actionBar.convert(local, from: self)
-            for b in buttons where b.frame.contains(inBar) {
+            for b in actionBar.subviews.compactMap({ $0 as? NSButton }) where b.frame.contains(inBar) {
                 let label = b.attributedTitle.string.isEmpty ? b.title : b.attributedTitle.string
                 if label == "Open" {
                     frontTap()
@@ -534,8 +1009,6 @@ final class AgentNodeView: NSView {
             }
             return
         }
-        if let edit = subviews.first(where: { $0.identifier?.rawValue == "editName" }),
-           edit.frame.contains(local) { return }
         if event.clickCount >= 2 {
             // Double-click title → rename only (never open terminal)
             if titleField.frame.insetBy(dx: -8, dy: -4).contains(local)
@@ -549,7 +1022,7 @@ final class AgentNodeView: NSView {
         dragging = true
         onDragBegan?()
         superview?.addSubview(self)
-        // Keep action bar above siblings after re-add
+        // Keep action bar + pencil above siblings after re-add
         addSubview(actionBar)
         if let edit = subviews.first(where: { $0.identifier?.rawValue == "editName" }) {
             addSubview(edit)
@@ -561,9 +1034,22 @@ final class AgentNodeView: NSView {
         let p = event.locationInWindow
         var nx = originStart.x + (p.x - dragStart.x)
         var ny = originStart.y + (p.y - dragStart.y)
-        nx = min(max(8, nx), max(8, superV.bounds.width - bounds.width - 8))
-        ny = min(max(8, ny), max(8, superV.bounds.height - bounds.height - 8))
-        // Live snap while dragging so modules stick to the dotted field
+        nx = max(4, nx)
+        ny = max(4, ny)
+        // Grow document when seat approaches edges so orch can leave the left HUD zone
+        if let canvas = superV as? AgentCanvasView {
+            let expanded = CanvasLayout.expandSize(
+                canvas.bounds.size,
+                toFit: CGPoint(x: nx, y: ny),
+                card: bounds.size
+            )
+            if expanded.width > canvas.bounds.width + 0.5 || expanded.height > canvas.bounds.height + 0.5 {
+                canvas.setFrameSize(expanded)
+            }
+        }
+        // Clamp only to (possibly expanded) document bounds
+        nx = min(nx, max(4, superV.bounds.width - bounds.width - 4))
+        ny = min(ny, max(4, superV.bounds.height - bounds.height - 4))
         let snapped = CanvasLayout.snap(CGPoint(x: nx, y: ny))
         setFrameOrigin(snapped)
         if let canvas = superview as? AgentCanvasView {
@@ -610,6 +1096,7 @@ final class AgentNodeView: NSView {
         } else {
             menu.addItem(withTitle: "Add subagent…", action: #selector(addFromMenu), keyEquivalent: "")
             menu.addItem(withTitle: "Seat policy", action: #selector(permsTap), keyEquivalent: "")
+            menu.addItem(withTitle: "Switch CLI / model…", action: #selector(modelTap), keyEquivalent: "")
             menu.addItem(NSMenuItem.separator())
             menu.addItem(withTitle: "Remove seat", action: #selector(killTap), keyEquivalent: "")
         }
@@ -674,18 +1161,50 @@ final class AgentCanvasView: NSView {
     var onKill: ((AgentNodeModel) -> Void)?
     var onOptions: ((AgentNodeModel) -> Void)?
     var onPerms: ((AgentNodeModel) -> Void)?
+    var onChangeModel: ((AgentNodeModel) -> Void)?
     var onFocus: ((AgentNodeModel) -> Void)?
     var onAddWorker: ((AgentNodeModel) -> Void)?
+    var onAddSub: ((AgentNodeModel) -> Void)?
+    var onHuman: ((AgentNodeModel) -> Void)?
     var onRename: ((AgentNodeModel) -> Void)?
+    var onHover: ((AgentNodeModel?) -> Void)?
     var onDragStateChanged: ((Bool) -> Void)?
     var onSelectionChanged: ((AgentNodeModel?) -> Void)?
+
+    /// Animated flow phase 0…1 for live edge packets (Phase 1 parity)
+    private var flowPhase: CGFloat = 0
+    private var flowTimer: Timer?
+    /// Linger for live edges after last active signal (match 3D ~5s)
+    private var edgeFlowExpire: [String: TimeInterval] = [:]
+    private let flowLingerSec: TimeInterval = 5
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = PongTheme.bg.cgColor
+        startFlowTimer()
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    private func startFlowTimer() {
+        flowTimer?.invalidate()
+        // 15fps is plenty for packets; only dirty the edge band, never the whole map
+        flowTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let now = Date().timeIntervalSince1970
+            let anyLive = self.edgeFlowExpire.values.contains(where: { $0 > now })
+            guard anyLive || !self.edgeFlowExpire.isEmpty else { return }
+            self.flowPhase = (self.flowPhase + 0.04).truncatingRemainder(dividingBy: 1)
+            // Expire stale keys so we stop animating
+            self.edgeFlowExpire = self.edgeFlowExpire.filter { $0.value > now - 0.5 }
+            if let box = self.contentBoundsOfNodes() {
+                self.setNeedsDisplay(box.insetBy(dx: -80, dy: -80))
+            } else {
+                self.needsDisplay = true
+            }
+        }
+        if let flowTimer { RunLoop.main.add(flowTimer, forMode: .common) }
+    }
 
     func select(globalId: String?) {
         selectedGlobalId = globalId
@@ -773,13 +1292,14 @@ final class AgentCanvasView: NSView {
         guard isPanning, let panStart, let scrollOriginStart,
               let scroll = enclosingScrollView else { return }
         let p = event.locationInWindow
-        let dx = p.x - panStart.x
-        let dy = p.y - panStart.y
-        // Drag background: content moves with cursor (natural pan)
+        // Clip-view bounds are in document space; window deltas ÷ magnification
+        let mag = max(0.01, scroll.magnification)
+        let dx = (p.x - panStart.x) / mag
+        let dy = (p.y - panStart.y) / mag
         var origin = scrollOriginStart
+        // Grab-and-drag: content follows the cursor
         origin.x -= dx
         origin.y -= dy
-        // Clamp to document
         let doc = bounds.size
         let vis = scroll.contentView.bounds.size
         let maxX = max(0, doc.width - vis.width)
@@ -788,6 +1308,8 @@ final class AgentCanvasView: NSView {
         origin.y = min(max(0, origin.y), maxY)
         scroll.contentView.setBoundsOrigin(origin)
         scroll.reflectScrolledClipView(scroll.contentView)
+        self.panStart = p
+        self.scrollOriginStart = origin
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -800,82 +1322,146 @@ final class AgentCanvasView: NSView {
         }
     }
 
+    // Trackpad / mouse-wheel: do NOT override — NSScrollView owns momentum pan
+    // and rubber-banding when the document is larger than the clip view.
+
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .openHand)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        // Map void — pure black (Lattice aerial stage)
-        PongTheme.bg.setFill()
-        bounds.fill()
+        // Only paint the dirty region — full-document grid on a large canvas
+        // was ~1M ovals/frame and made 2D take seconds to open.
+        let clip = dirtyRect.intersection(bounds)
+        guard !clip.isNull, clip.width > 0, clip.height > 0 else { return }
 
-        // Uniform dotted grid (design-tool style: even spacing, equal dots)
+        PongTheme.bg.setFill()
+        clip.fill()
+
+        // Dotted grid only inside dirtyRect
         let step = CanvasLayout.gridStep
         let r: CGFloat = PongTheme.appearance == .dark ? 0.9 : 0.75
         let a: CGFloat = PongTheme.appearance == .dark ? 0.18 : 0.14
         PongTheme.ink.withAlphaComponent(a).setFill()
-        var x: CGFloat = step
-        while x < bounds.width {
-            var y: CGFloat = step
-            while y < bounds.height {
-                NSBezierPath(ovalIn: NSRect(x: x - r, y: y - r, width: r * 2, height: r * 2)).fill()
+        let x0 = max(step, (clip.minX / step).rounded(.down) * step)
+        let y0 = max(step, (clip.minY / step).rounded(.down) * step)
+        var x = x0
+        while x <= clip.maxX + step {
+            var y = y0
+            while y <= clip.maxY + step {
+                if clip.insetBy(dx: -2, dy: -2).contains(NSPoint(x: x, y: y)) {
+                    NSBezierPath(ovalIn: NSRect(x: x - r, y: y - r, width: r * 2, height: r * 2)).fill()
+                }
                 y += step
             }
             x += step
         }
 
-        // Edges per team: conductor → workers (labeled). No line to "+".
-        // Workers chained vertically with peer-flow labels when 2+.
+        // Edges from live flow_graph (same topology as 3D / Architecture canvas).
+        // Fallback: FlowGraph.defaultEdges when graph empty.
         let sessions = Set(models.map(\.session))
+        let db = PairState.loadPairsDb()
         for sess in sessions {
-            guard let c = models.first(where: { $0.session == sess && $0.role == "conductor" }),
-                  let cv = nodeViews[c.globalId] else { continue }
-            let from = NSPoint(x: cv.frame.maxX - 2, y: cv.frame.midY)
-            let workers = models.filter { $0.session == sess && $0.role == "worker" }
-                .sorted { $0.origin.y > $1.origin.y } // top-to-bottom in view coords (y up)
-                .sorted { a, b in
-                    // stable visual order by y descending (higher y first)
-                    a.origin.y > b.origin.y
+            let entry = db[sess] as? [String: Any] ?? [:]
+            let edges = FlowGraph.load(from: entry)
+            let byId: [String: AgentNodeModel] = {
+                var m: [String: AgentNodeModel] = [:]
+                for n in models where n.session == sess {
+                    m[n.id] = n
                 }
+                return m
+            }()
 
-            for m in workers {
-                guard let wv = nodeViews[m.globalId] else { continue }
-                let to = NSPoint(x: wv.frame.minX + 2, y: wv.frame.midY)
+            for edge in edges {
+                guard let fromM = byId[edge.from], let toM = byId[edge.to],
+                      let fv = nodeViews[fromM.globalId],
+                      let tv = nodeViews[toM.globalId] else { continue }
+                // Never draw to add chips
+                if fromM.role == "add" || fromM.role == "add-sub"
+                    || toM.role == "add" || toM.role == "add-sub" { continue }
+
+                let style = edgeStyle(kind: edge.kind)
+                let (fromPt, toPt) = edgeEndpoints(
+                    fromFrame: fv.frame, toFrame: tv.frame, style: style
+                )
+                let human = fromM.status.lowercased().contains("human")
+                    || toM.status.lowercased().contains("human")
+                let live = SeatActivity.linkHasLiveData(
+                    fromStatus: fromM.status, fromRole: fromM.role,
+                    toStatus: toM.status, toRole: toM.role
+                )
                 let label: String = {
-                    let st = m.status.lowercased()
-                    if st.contains("human") { return "needs you" }
-                    if st.contains("busy") || st.contains("running") { return "assign · build" }
-                    return "delegate"
+                    if human { return "needs you" }
+                    if live {
+                        switch edge.kind {
+                        case "claim": return "claim · send"
+                        case "peer": return "peer · live"
+                        case "sub": return "sub · live"
+                        case "review": return "review · live"
+                        default: return "assign · live"
+                        }
+                    }
+                    let raw = edge.label.isEmpty
+                        ? FlowGraph.Edge.defaultLabel(kind: edge.kind)
+                        : edge.label
+                    return raw.lowercased()
                 }()
-                drawEdge(from: from, to: to,
-                         human: m.status.lowercased().contains("human"),
-                         style: .orchToWorker,
-                         label: label)
+                let edgeKey = "\(sess)|\(edge.id)"
+                let now = Date().timeIntervalSince1970
+                if live { edgeFlowExpire[edgeKey] = now + flowLingerSec }
+                let flowing = live || (edgeFlowExpire[edgeKey] ?? 0) > now
+                drawEdge(
+                    from: fromPt, to: toPt,
+                    human: human, live: flowing, style: style, label: label,
+                    animatePackets: flowing
+                )
             }
-
-            // Peer flow between workers (not for single worker)
-            // Connect right-side midpoints so arrows sit on the visible link
-            if workers.count >= 2 {
-                for i in 0..<(workers.count - 1) {
-                    guard let a = nodeViews[workers[i].globalId],
-                          let b = nodeViews[workers[i + 1].globalId] else { continue }
-                    // Slight inset from right edge so arrow tracks the curve
-                    let p0 = NSPoint(x: a.frame.maxX - 18, y: a.frame.minY + 4)
-                    let p1 = NSPoint(x: b.frame.maxX - 18, y: b.frame.maxY - 4)
-                    drawEdge(from: p0, to: p1, human: false, style: .workerPeer, label: "peer · handoff")
-                }
-            }
-            // Intentionally no edge to the small "+" node
         }
     }
 
-    private enum EdgeStyle { case orchToWorker, workerPeer }
+    private enum EdgeStyle { case orchToWorker, workerPeer, claimBack }
 
-    private func drawEdge(from: NSPoint, to: NSPoint, human: Bool, style: EdgeStyle, label: String) {
+    private func edgeStyle(kind: String) -> EdgeStyle {
+        switch kind.lowercased() {
+        case "peer": return .workerPeer
+        case "claim", "review": return .claimBack
+        default: return .orchToWorker // delegate, sub, …
+        }
+    }
+
+    private func edgeEndpoints(
+        fromFrame: NSRect, toFrame: NSRect, style: EdgeStyle
+    ) -> (NSPoint, NSPoint) {
+        switch style {
+        case .orchToWorker:
+            return (
+                NSPoint(x: fromFrame.maxX - 2, y: fromFrame.midY),
+                NSPoint(x: toFrame.minX + 2, y: toFrame.midY)
+            )
+        case .workerPeer:
+            return (
+                NSPoint(x: fromFrame.maxX - 18, y: fromFrame.minY + 4),
+                NSPoint(x: toFrame.maxX - 18, y: toFrame.maxY - 4)
+            )
+        case .claimBack:
+            // Agent → orch / parent (upward-ish)
+            return (
+                NSPoint(x: fromFrame.midX, y: fromFrame.maxY - 2),
+                NSPoint(x: toFrame.midX, y: toFrame.minY + 2)
+            )
+        }
+    }
+
+    private func drawEdge(
+        from: NSPoint, to: NSPoint,
+        human: Bool, live: Bool, style: EdgeStyle, label: String,
+        animatePackets: Bool = false
+    ) {
         let path = NSBezierPath()
         path.move(to: from)
         let midX = (from.x + to.x) / 2
+        let midY = (from.y + to.y) / 2
         let c1: NSPoint
         let c2: NSPoint
         switch style {
@@ -883,25 +1469,29 @@ final class AgentCanvasView: NSView {
             c1 = NSPoint(x: midX, y: from.y)
             c2 = NSPoint(x: midX, y: to.y)
         case .workerPeer:
-            // Vertical-ish S curve hugging the right side of cards
             c1 = NSPoint(x: from.x + 12, y: from.y - abs(from.y - to.y) * 0.25)
             c2 = NSPoint(x: to.x + 12, y: to.y + abs(from.y - to.y) * 0.25)
+        case .claimBack:
+            c1 = NSPoint(x: from.x, y: midY)
+            c2 = NSPoint(x: to.x, y: midY)
         }
         path.curve(to: to, controlPoint1: c1, controlPoint2: c2)
 
-        // Graph edges = white line work. Role color only on seats, not edges —
-        // except human path uses amber.
-        let color: NSColor = human
+        // Graph edges = white line work; human amber; live edges brighten
+        let base: NSColor = human
             ? PongTheme.amber
-            : (style == .workerPeer ? PongTheme.lineSoft : PongTheme.line)
+            : (style == .workerPeer || style == .claimBack ? PongTheme.lineSoft : PongTheme.line)
+        let color: NSColor = live && !human
+            ? PongTheme.lineStrong
+            : base
 
-        // Soft white underglow then crisp stroke
-        path.lineWidth = style == .workerPeer ? 2.5 : 3.5
-        color.withAlphaComponent(0.2).setStroke()
+        let under: CGFloat = live ? 4.0 : (style == .workerPeer || style == .claimBack ? 2.5 : 3.5)
+        path.lineWidth = under
+        color.withAlphaComponent(live ? 0.35 : 0.2).setStroke()
         path.stroke()
-        path.lineWidth = style == .workerPeer ? 1.15 : 1.4
-        if style == .workerPeer {
-            let dashes: [CGFloat] = [4, 4]
+        path.lineWidth = live ? 1.8 : (style == .workerPeer || style == .claimBack ? 1.15 : 1.4)
+        if style == .workerPeer || style == .claimBack {
+            let dashes: [CGFloat] = style == .claimBack ? [3, 5] : [4, 4]
             path.setLineDash(dashes, count: 2, phase: 0)
         }
         color.setStroke()
@@ -910,9 +1500,27 @@ final class AgentCanvasView: NSView {
 
         drawArrowHead(at: to, from: c2, color: color)
 
-        let r: CGFloat = 2.5
+        // Origin glow when link is live (working)
+        let r: CGFloat = live ? 3.5 : 2.5
         color.setFill()
         NSBezierPath(ovalIn: NSRect(x: from.x - r, y: from.y - r, width: r * 2, height: r * 2)).fill()
+        if live {
+            color.withAlphaComponent(0.35).setFill()
+            NSBezierPath(ovalIn: NSRect(x: from.x - r * 2, y: from.y - r * 2, width: r * 4, height: r * 4)).fill()
+        }
+
+        // Traveling packets when data flows (3D floor-dot parity)
+        if animatePackets {
+            for i in 0..<2 {
+                let t = (flowPhase + CGFloat(i) * 0.5).truncatingRemainder(dividingBy: 1)
+                let pt = cubicBezier(t: t, p0: from, c1: c1, c2: c2, p3: to)
+                let pr: CGFloat = 3.2
+                color.setFill()
+                NSBezierPath(ovalIn: NSRect(x: pt.x - pr, y: pt.y - pr, width: pr * 2, height: pr * 2)).fill()
+                color.withAlphaComponent(0.25).setFill()
+                NSBezierPath(ovalIn: NSRect(x: pt.x - pr * 2, y: pt.y - pr * 2, width: pr * 4, height: pr * 4)).fill()
+            }
+        }
 
         guard !label.isEmpty else { return }
         let bx = 0.125 * from.x + 0.375 * c1.x + 0.375 * c2.x + 0.125 * to.x
@@ -930,10 +1538,27 @@ final class AgentCanvasView: NSView {
                                 xRadius: 3, yRadius: 3)
         PongTheme.bgElevated.setFill()
         pill.fill()
-        PongTheme.lineSoft.setStroke()
+        (live ? color : PongTheme.lineSoft).setStroke()
         pill.lineWidth = 1
         pill.stroke()
         s.draw(at: labelOrigin)
+    }
+
+    /// Cubic Bezier point (matches NSBezierPath curve)
+    private func cubicBezier(t: CGFloat, p0: NSPoint, c1: NSPoint, c2: NSPoint, p3: NSPoint) -> NSPoint {
+        let u = 1 - t
+        let tt = t * t
+        let uu = u * u
+        let uuu = uu * u
+        let ttt = tt * t
+        var p = NSPoint(x: uuu * p0.x, y: uuu * p0.y)
+        p.x += 3 * uu * t * c1.x
+        p.y += 3 * uu * t * c1.y
+        p.x += 3 * u * tt * c2.x
+        p.y += 3 * u * tt * c2.y
+        p.x += ttt * p3.x
+        p.y += ttt * p3.y
+        return p
     }
 
     private func drawArrowHead(at tip: NSPoint, from: NSPoint, color: NSColor) {
@@ -1031,8 +1656,11 @@ final class AgentCanvasView: NSView {
         v.onKill = { [weak self] m in self?.onKill?(m) }
         v.onOptions = { [weak self] m in self?.onOptions?(m) }
         v.onPerms = { [weak self] m in self?.onPerms?(m) }
+        v.onChangeModel = { [weak self] m in self?.onChangeModel?(m) }
         v.onFocus = { [weak self] m in self?.onFocus?(m) }
         v.onAddWorker = { [weak self] m in self?.onAddWorker?(m) }
+        v.onAddSub = { [weak self] m in self?.onAddSub?(m) }
+        v.onHuman = { [weak self] m in self?.onHuman?(m) }
         v.onRename = { [weak self] m in self?.onRename?(m) }
         v.onDragBegan = { [weak self] in
             self?.isDragging = true
@@ -1050,7 +1678,12 @@ final class AgentCanvasView: NSView {
         if m.role == "add" || m.role == "add-sub" { return }
         let snapped = CanvasLayout.snap(origin)
         liveOrigins[m.globalId] = snapped
-        // Live write: both bare + scoped keys, pair file + canvas-all
+        // Grow canvas after drop if needed
+        let expanded = CanvasLayout.expandSize(bounds.size, toFit: snapped, card: AgentNodeView.size)
+        if expanded.width > bounds.width + 0.5 || expanded.height > bounds.height + 0.5 {
+            setFrameSize(expanded)
+        }
+        // Live write: pair dual bare+scoped; canvas-all scoped-only
         CanvasLayout.saveSeat(session: m.session, nodeId: m.id, origin: snapped)
         if let i = models.firstIndex(where: { $0.globalId == m.globalId }) {
             models[i].origin = snapped

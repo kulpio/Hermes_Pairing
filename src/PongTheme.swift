@@ -5,7 +5,7 @@ import CoreText
 /// Black void · lime line work · blue orch / magenta agents as role chips only.
 enum PongTheme {
     // MARK: - Product identity (public name)
-    /// Public product name. Internal code/paths still say Pong; UI shows CyberPong.
+    /// Product name — always CyberPong in UI / About / menus.
     static let productName = "CyberPong"
     /// Short tagline for About / tooltips
     static let productTagline = "Local agent mission control"
@@ -99,18 +99,19 @@ enum PongTheme {
 
     // MARK: - Type
 
+    /// Light mode: near-black primary + mid greys that stay readable on white chrome.
     static var textPrimary: NSColor {
-        appearance == .dark ? NSColor.white : NSColor(calibratedWhite: 0.04, alpha: 1)
+        appearance == .dark ? NSColor.white : NSColor(calibratedWhite: 0.06, alpha: 1)
     }
     static var textSecondary: NSColor {
         appearance == .dark
             ? NSColor(calibratedWhite: 0.62, alpha: 1)
-            : NSColor(calibratedWhite: 0.40, alpha: 1)
+            : NSColor(calibratedWhite: 0.28, alpha: 1) // was ~0.40 — low contrast on white
     }
     static var textTertiary: NSColor {
         appearance == .dark
             ? NSColor(calibratedWhite: 0.42, alpha: 1)
-            : NSColor(calibratedWhite: 0.55, alpha: 1)
+            : NSColor(calibratedWhite: 0.38, alpha: 1) // was ~0.55 — captions vanished
     }
     static var textMono: NSColor { textSecondary }
 
@@ -191,6 +192,39 @@ enum PongTheme {
     static let radiusBtn: CGFloat = 4
     static let radiusRail: CGFloat = 6
     static let hairline: CGFloat = 1
+
+    /// Style NSPopUpButton to match CyberPong chrome (not default aqua textured).
+    static func stylePopUp(_ pop: NSPopUpButton) {
+        pop.bezelStyle = .rounded
+        pop.isBordered = true
+        pop.wantsLayer = true
+        pop.layer?.cornerRadius = radiusPill
+        pop.layer?.backgroundColor = bgElevated.cgColor
+        pop.layer?.borderWidth = hairline
+        pop.layer?.borderColor = border.cgColor
+        pop.font = labelFont(11)
+        pop.contentTintColor = textPrimary
+        if let cell = pop.cell as? NSPopUpButtonCell {
+            cell.arrowPosition = .arrowAtBottom
+            cell.backgroundStyle = .emphasized
+        }
+    }
+
+    /// Compact top-nav tab button (Map / Mission / Setup).
+    static func styleTopTab(_ b: NSButton, selected: Bool) {
+        b.bezelStyle = .inline
+        b.isBordered = false
+        b.wantsLayer = true
+        b.layer?.cornerRadius = radiusPill
+        b.layer?.backgroundColor = (selected ? lime.withAlphaComponent(0.22) : NSColor.clear).cgColor
+        b.layer?.borderWidth = selected ? hairline : 0
+        b.layer?.borderColor = selected ? lime.withAlphaComponent(0.55).cgColor : nil
+        let title = b.attributedTitle.string.isEmpty ? b.title : b.attributedTitle.string
+        b.attributedTitle = NSAttributedString(string: title, attributes: [
+            .foregroundColor: selected ? textPrimary : textSecondary,
+            .font: font(11, weight: selected ? .semibold : .medium),
+        ])
+    }
 
     enum SystemSignal {
         case idle
@@ -609,6 +643,68 @@ enum PongTheme {
             }
         }
         return anyLiveWork ? .orchestratorWorking : .idle
+    }
+}
+
+// MARK: - Neon seat accent catalog (rename / primitive / Terminal)
+
+/// Fixed neon swatches only — no free color well. Each swatch is a full
+/// `TerminalTheme.Colors` triple (dark-terminal friendly). Highlight = map glow.
+enum PongNeonCatalog {
+    struct Swatch {
+        let id: String
+        let name: String
+        let colors: TerminalTheme.Colors
+        var highlightNS: NSColor {
+            let h = colors.highlight
+            return NSColor(calibratedRed: h.0, green: h.1, blue: h.2, alpha: 1)
+        }
+    }
+
+    /// ~10 product neon accents
+    static let all: [Swatch] = [
+        Swatch(id: "cyan", name: "Electric cyan", colors: TerminalTheme.Colors(
+            bg: (0.04, 0.08, 0.12), text: (0.85, 0.96, 1.0), highlight: (0.05, 0.92, 1.0))),
+        Swatch(id: "magenta", name: "Hot magenta", colors: TerminalTheme.Colors(
+            bg: (0.10, 0.04, 0.09), text: (1.0, 0.88, 0.96), highlight: (1.0, 0.25, 0.78))),
+        Swatch(id: "lime", name: "Acid lime", colors: TerminalTheme.Colors(
+            bg: (0.06, 0.09, 0.04), text: (0.92, 0.98, 0.80), highlight: (0.78, 0.95, 0.20))),
+        Swatch(id: "violet", name: "Neon violet", colors: TerminalTheme.Colors(
+            bg: (0.07, 0.05, 0.12), text: (0.92, 0.88, 1.0), highlight: (0.72, 0.42, 1.0))),
+        Swatch(id: "plasma", name: "Plasma blue", colors: TerminalTheme.Colors(
+            bg: (0.04, 0.06, 0.14), text: (0.82, 0.90, 1.0), highlight: (0.25, 0.55, 1.0))),
+        Swatch(id: "amber", name: "Amber gold", colors: TerminalTheme.Colors(
+            bg: (0.10, 0.08, 0.04), text: (1.0, 0.95, 0.82), highlight: (1.0, 0.72, 0.15))),
+        Swatch(id: "coral", name: "Coral pink", colors: TerminalTheme.Colors(
+            bg: (0.11, 0.05, 0.06), text: (1.0, 0.90, 0.90), highlight: (1.0, 0.40, 0.48))),
+        Swatch(id: "mint", name: "Mint", colors: TerminalTheme.Colors(
+            bg: (0.04, 0.10, 0.08), text: (0.85, 1.0, 0.94), highlight: (0.20, 0.95, 0.72))),
+        Swatch(id: "whitehot", name: "White-hot", colors: TerminalTheme.Colors(
+            bg: (0.08, 0.08, 0.10), text: (0.98, 0.98, 1.0), highlight: (0.95, 0.97, 1.0))),
+        Swatch(id: "ruby", name: "Ruby", colors: TerminalTheme.Colors(
+            bg: (0.11, 0.04, 0.05), text: (1.0, 0.88, 0.90), highlight: (1.0, 0.18, 0.32))),
+    ]
+
+    static func swatch(id: String) -> Swatch? {
+        all.first { $0.id == id }
+    }
+
+    /// Best match by highlight RGB distance (for reselecting chips).
+    static func matching(_ colors: TerminalTheme.Colors?) -> Swatch? {
+        guard let colors else { return nil }
+        let h = colors.highlight
+        var best: Swatch?
+        var bestD = CGFloat.greatestFiniteMagnitude
+        for s in all {
+            let sh = s.colors.highlight
+            let d = abs(sh.0 - h.0) + abs(sh.1 - h.1) + abs(sh.2 - h.2)
+            if d < bestD { bestD = d; best = s }
+        }
+        return bestD < 0.35 ? best : nil
+    }
+
+    static func nsColor(from any: Any?) -> NSColor? {
+        TerminalTheme.Colors.from(any)?.asNSColors.hi
     }
 }
 

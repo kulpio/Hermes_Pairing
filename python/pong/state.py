@@ -336,29 +336,62 @@ def write_bind_card(session: str) -> Path:
         pass
     state = load_session_state(session)
     c = conductor_from_state(state)
+    display = (state.get("display_name") or session or "").strip()
     lines = [
         f"# Pong bind — {session}",
         "",
-        f"- conductor: {c.get('label')} (`{c.get('type')}`) cmd=`{c.get('cmd')}`",
+        f"- team: {display}",
+        f"- conductor: {c.get('label')} (`{c.get('type')}`) cmd=`{c.get('cmd')}` "
+        f"role=Orchestrator",
         f"- transport_default: {state.get('transport_default') or 'job+paste'}",
         f"- project_root: {state.get('project_root') or '(unset)'}",
         "",
-        "## Workers",
+        "## Who is who (mission roles — durable)",
     ]
-    for w in workers_from_state(state):
-        lines.append(
-            f"- `{w.get('id')}` {w.get('label')} ({w.get('type')}) "
-            f"marker={w.get('done_marker')}"
-        )
+    try:
+        from .role_identity import format_team_roster_roles
+
+        lines.append(format_team_roster_roles(state))
+    except Exception:
+        for w in workers_from_state(state):
+            lines.append(
+                f"- `{w.get('id')}` {w.get('label')} ({w.get('type')}) "
+                f"role={w.get('mission_role') or w.get('role') or 'coder'} "
+                f"marker={w.get('done_marker')}"
+            )
+    lines += [
+        "",
+        "## Architecture road (hard guardrails)",
+        "Job assign/claim must follow edges. Hop-skips are refused by `pong job create`.",
+        "Print a seat's road: `pong architecture recap --seat <id>`",
+        "Print durable identity: `pong seat brief --seat <id>`",
+        "",
+    ]
+    try:
+        from .flow import effective_edges
+
+        edges = effective_edges(state)
+        if edges:
+            for e in edges:
+                lines.append(
+                    f"- {e['from']} → {e['to']}  ({e.get('kind') or 'delegate'})"
+                )
+        else:
+            lines.append("- (no seats — empty road)")
+    except Exception:
+        lines.append("- (architecture unavailable)")
     lines += [
         "",
         "## Rules",
         "- You are bound to THIS session only (enforced: PONG_SESSION + PONG_TOKEN).",
-        "- Submit work with: `pong job create --worker <id> --task '…'`",
+        "- Each seat keeps its **mission role** for the life of the team "
+        "(coder stays coder, reviewer stays reviewer) unless CyberPong edits it.",
+        "- Submit work with: `pong job create --worker <id> --task '…'` "
+        "(only along architecture edges from your seat).",
         "- Or: `pong delegate --worker <id> --no-wait '…'`",
         "- Cross-team paste/jobs are refused. Sole inter-team channel: "
         "`pong brief send --to <other-session> '…'` (file inbox, never auto-pasted).",
-        "- While bridge is on: orchestrate only — do not implement product code yourself.",
+        "- While bridge is on: orchestrator routes only — do not implement product code yourself.",
         "",
     ]
     path = binds_dir() / f"{session}.md"

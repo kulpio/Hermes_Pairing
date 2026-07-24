@@ -31,9 +31,10 @@ EOF
 )"
 ```
 
-- Default transport is **job file + optional TUI paste**. Job JSON is the source of truth.
-- `--no-paste` — control plane only (robust).
-- `--headless` — try non-interactive worker CLI after writing the job.
+- Default transport is **job file + TUI paste** (worker should see the prompt in Terminal). Job JSON is the source of truth.
+- `--no-paste` — control plane only when you intentionally skip the TUI.
+- **Do not use `--headless` by default** — it hides work from the Terminal seat. Only if paste is impossible and the human asked for offline run.
+- **Architecture edges are enforced.** If Architecture shows `orch → Bob → Lil bob`, you **must** `job create --worker` Bob first; a direct job to Lil bob is refused (`flow_hop_required`). Bob then creates the sub-job for Lil bob. Claims notify along **claim** edges back to you — still run acceptance before ledger accept.
 
 Compat:
 

@@ -1,6 +1,19 @@
 import AppKit
 
-/// Lasting control panel: left rail + primary stage (Canvas · Mission · Setup).
+/// Canvas host that prefers the left HUD splitter strip over full-bleed SceneKit/map.
+/// Without this, map3D (fills the page) can win hit-testing after layout reorders.
+private final class CanvasPageView: NSView {
+    weak var map3D: Agent3DMapView?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let split = map3D?.hitTestLeftHUDSplitter(in: self, point: point) {
+            return split
+        }
+        return super.hitTest(point)
+    }
+}
+
+/// Lasting control panel: top tabs + primary stage (Canvas · Mission · Setup).
 /// Design: docs/UI-VISION.md — orchestration surface, not a list form.
 final class PanelController: NSObject, NSWindowDelegate {
     static let shared = PanelController()
@@ -19,8 +32,12 @@ final class PanelController: NSObject, NSWindowDelegate {
     private var statusText: NSTextField!
     private var refreshBtn: NSButton!
     private var appearanceBtn: NSButton!
+    /// Top nav tabs (Map / Mission / Setup) — reclaims former left-rail width.
+    private var topTabCanvas: NSButton!
+    private var topTabMission: NSButton!
+    private var topTabSetup: NSButton!
 
-    // Rail
+    // Legacy rail (hidden; width 0 — kept so existing styleRail calls no-op safely)
     private var rail: NSView!
     private var railCanvas: NSButton!
     private var railMission: NSButton!
@@ -28,7 +45,7 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     // Stage
     private var stage: NSView!
-    private var canvasPage: NSView!
+    private var canvasPage: CanvasPageView!
     private var canvasScroll: NSScrollView!
     private var canvas: AgentCanvasView!
     private var map3D: Agent3DMapView!
@@ -46,12 +63,17 @@ final class PanelController: NSObject, NSWindowDelegate {
     private var lastSnapshot: [String: Any]?
     private var canvasDragging = false
     /// true = 3D constellation (default special view); false = flat map
-    private var use3DMap = true
+    /// Prefer product default 3D so first open shows the promise of the map.
+    private var use3DMap: Bool = AppAISettings.prefer3DMap
     private var poll: Timer?
     private let guide = LinkGuideController()
+    /// Mission ask strip — last grounded reply survives paintMission rebuilds.
+    private var missionAskLastReply: String = ""
+    private var hardRefreshInFlight = false
 
-    private let railW: CGFloat = 64
-    /// Tall enough for a large CyberPong wordmark lockup
+    /// Left rail removed — map is full-bleed under the top bar.
+    private let railW: CGFloat = 0
+    /// Tall enough for wordmark + team popup + top tabs
     private let topH: CGFloat = 58
     private let titlebarLift: CGFloat = 30
     private let trafficInset: CGFloat = 76
@@ -64,13 +86,46 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     func show() {
         if window == nil { build() }
+        // Always land on canvas + 3D when opening the app (unless user saved 2D)
+        selected = .canvas
+        use3DMap = AppAISettings.prefer3DMap
         reload()
+        applyMapMode()
+        go(.canvas)
         startPoll()
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        // Promise view: constellation even before first team
+        ensure3DVisible()
     }
 
     func refreshUI() { reload() }
+
+    /// Force 3D map visible (empty-state preview seats if no team yet).
+    func ensure3DVisible() {
+        use3DMap = true
+        AppAISettings.setPrefer3DMap(true)
+        selected = .canvas
+        go(.canvas)
+        applyMapMode()
+        refreshCanvas()
+        if use3DMap {
+            map3D?.resetCamera()
+            map3D?.setMapPlaying(true)
+        }
+        DispatchQueue.main.async {
+            AppAIChatBubble.shared.attachIfNeeded(to: self.canvasPage)
+        }
+    }
+
+    @objc private func openAppAIGuide() {
+        AppAIOnboarding.present()
+    }
+
+    /// Host for floating Guide bubble.
+    func _mapHostForBubble() -> NSView? {
+        canvasPage
+    }
 
     static func label(_ text: String, frame: NSRect, bold: Bool = false,
                       size: CGFloat = 13, secondary: Bool = false) -> NSTextField {
@@ -123,10 +178,10 @@ final class PanelController: NSObject, NSWindowDelegate {
         root.autoresizingMask = [.width, .height]
 
         buildTopBar()
-        buildRail()
+        buildRail() // builds hidden zero-width shell for API compatibility
+        rail.isHidden = true
         buildStage()
         root.addSubview(topBar)
-        root.addSubview(rail)
         root.addSubview(stage)
 
         win.contentView = root
@@ -173,10 +228,13 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
         stage?.layer?.backgroundColor = PongTheme.bg.cgColor
         styleRail()
+        styleTopTabs()
+        if let teamPopup { PongTheme.stylePopUp(teamPopup) }
         styleAppearanceBtn()
         styleRefreshBtn()
         restyleCanvasToolbar()
         canvas?.retheme()
+        map3D?.applyChromeTheme()
     }
 
     private func styleAppearanceBtn() {
@@ -219,7 +277,11 @@ final class PanelController: NSObject, NSWindowDelegate {
         for b in canvasToolbar.subviews.compactMap({ $0 as? NSButton }) {
             let title = b.attributedTitle.string
             let upper = title.uppercased()
-            if upper.contains("NEW") || upper.contains("TEAM") {
+            // Only the real New team CTA — never rewrite titles that merely contain "team".
+            let isNewTeamCTA =
+                b.action == #selector(newTeamPressed)
+                || upper == "NEW TEAM"
+            if isNewTeamCTA {
                 // White line-work CTA (not role colors)
                 b.layer?.backgroundColor = PongTheme.ink.cgColor
                 b.layer?.borderWidth = 0
@@ -258,13 +320,9 @@ final class PanelController: NSObject, NSWindowDelegate {
         topBar.frame = NSRect(x: 0, y: topY, width: W, height: topH)
         layoutTopBar(width: W)
 
-        // Rail full height below top bar
+        // Stage full-bleed under top bar (no left rail)
         let bodyH = topY
-        rail.frame = NSRect(x: 0, y: 0, width: railW, height: bodyH)
-        layoutRail(height: bodyH)
-
-        // Stage
-        stage.frame = NSRect(x: railW, y: 0, width: W - railW, height: bodyH)
+        stage.frame = NSRect(x: 0, y: 0, width: W, height: bodyH)
         for page in [canvasPage, missionPage, setupPage] {
             page?.frame = stage.bounds
         }
@@ -300,9 +358,16 @@ final class PanelController: NSObject, NSWindowDelegate {
         teamPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         teamPopup.target = self
         teamPopup.action = #selector(teamChanged)
-        teamPopup.bezelStyle = .texturedRounded
         teamPopup.font = PongTheme.labelFont(11)
+        PongTheme.stylePopUp(teamPopup)
         topBar.addSubview(teamPopup)
+
+        topTabCanvas = makeTopTab("Map", tag: 0)
+        topTabMission = makeTopTab("Mission", tag: 1)
+        topTabSetup = makeTopTab("Setup", tag: 2)
+        topBar.addSubview(topTabCanvas)
+        topBar.addSubview(topTabMission)
+        topBar.addSubview(topTabSetup)
 
         statusPill = NSView(frame: .zero)
         statusPill.wantsLayer = true
@@ -336,17 +401,43 @@ final class PanelController: NSObject, NSWindowDelegate {
         topBar.addSubview(line)
     }
 
+    private func makeTopTab(_ title: String, tag: Int) -> NSButton {
+        let b = NSButton(frame: .zero)
+        b.title = title
+        b.tag = tag
+        b.target = self
+        b.action = #selector(railPressed(_:))
+        b.toolTip = title
+        PongTheme.styleTopTab(b, selected: false)
+        return b
+    }
+
+    private func styleTopTabs() {
+        guard topTabCanvas != nil else { return }
+        PongTheme.styleTopTab(topTabCanvas, selected: selected == .canvas)
+        PongTheme.styleTopTab(topTabMission, selected: selected == .mission)
+        PongTheme.styleTopTab(topTabSetup, selected: selected == .setup)
+    }
+
     private func layoutTopBar(width W: CGFloat) {
         let left = trafficInset
-        // Large lockup: ~4.23:1 glow PNG — dominant presence left of team switcher
-        let wmH: CGFloat = 38
-        let wmW: CGFloat = min(300, max(200, W * 0.38))
+        // Compact wordmark so team + tabs fit
+        let wmH: CGFloat = 34
+        let wmW: CGFloat = min(180, max(120, W * 0.18))
         let wmY = (topH - wmH) / 2
         brandLogo.frame = NSRect(x: left, y: wmY, width: wmW, height: wmH)
         brandLabel.frame = NSRect(x: left, y: wmY, width: wmW, height: wmH)
-        let teamX = left + wmW + 16
-        let teamW = min(200, max(100, W - teamX - 250))
+        let teamX = left + wmW + 12
+        let teamW = min(160, max(96, W * 0.14))
         teamPopup.frame = NSRect(x: teamX, y: (topH - 28) / 2, width: teamW, height: 28)
+        // Tabs immediately after team dropdown
+        var tabX = teamX + teamW + 10
+        let tabH: CGFloat = 26
+        let tabY = (topH - tabH) / 2
+        for (btn, w) in [(topTabCanvas, CGFloat(48)), (topTabMission, CGFloat(64)), (topTabSetup, CGFloat(52))] {
+            btn?.frame = NSRect(x: tabX, y: tabY, width: w, height: tabH)
+            tabX += w + 4
+        }
         statusPill.frame = NSRect(x: W - 236, y: (topH - 28) / 2, width: 140, height: 28)
         appearanceBtn.frame = NSRect(x: W - 80, y: (topH - 28) / 2, width: 28, height: 28)
         refreshBtn.frame = NSRect(x: W - 44, y: (topH - 28) / 2, width: 28, height: 28)
@@ -470,8 +561,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         stage.wantsLayer = true
         stage.layer?.backgroundColor = PongTheme.bg.cgColor
 
-        // Canvas page
-        canvasPage = NSView(frame: .zero)
+        // Canvas page (hit-tests left HUD splitter above SceneKit)
+        canvasPage = CanvasPageView(frame: .zero)
         canvasScroll = NSScrollView(frame: .zero)
         canvasScroll.hasVerticalScroller = true
         canvasScroll.hasHorizontalScroller = true
@@ -479,7 +570,8 @@ final class PanelController: NSObject, NSWindowDelegate {
         canvasScroll.borderType = .noBorder
         canvasScroll.drawsBackground = false
         canvasScroll.backgroundColor = .clear
-        canvas = AgentCanvasView(frame: NSRect(x: 0, y: 0, width: 1600, height: 1100))
+        // Comfortable workplace — sized to content on reload (not a continent)
+        canvas = AgentCanvasView(frame: NSRect(origin: .zero, size: CanvasLayout.minCanvas))
         canvas.onFront = { [weak self] m in self?.frontModel(m) }
         canvas.onKill = { [weak self] m in self?.killModel(m) }
         canvas.onOptions = { [weak self] m in
@@ -488,11 +580,21 @@ final class PanelController: NSObject, NSWindowDelegate {
         canvas.onPerms = { [weak self] m in
             PermissionsSheetController.shared.show(for: m.session, workerId: m.id) { self?.reload() }
         }
+        canvas.onChangeModel = { [weak self] m in
+            self?.changeSeatModel(m)
+        }
         canvas.onFocus = { m in
             TeamFocusController.shared.show(session: m.session)
         }
         canvas.onAddWorker = { [weak self] m in
             self?.handleAdd(from: m)
+        }
+        canvas.onAddSub = { [weak self] m in
+            self?.addWorker(to: m.session, parentId: m.id, parentLabel: m.title, guide: true)
+        }
+        canvas.onHuman = { [weak self] m in
+            // YOU console lives on the HUD (re-parented to canvasPage for both modes)
+            self?.map3D?.openHumanDock(session: m.session)
         }
         canvas.onRename = { [weak self] m in
             self?.renameSeat(m)
@@ -505,11 +607,15 @@ final class PanelController: NSObject, NSWindowDelegate {
                 self?.canvasScroll.hasHorizontalScroller = !dragging
             }
         }
-        // Large document so pan has room; pinch / toolbar zoom
+        // Pinch / toolbar zoom; trackpad pan uses native NSScrollView momentum
         canvasScroll.allowsMagnification = true
-        canvasScroll.minMagnification = 0.4
-        canvasScroll.maxMagnification = 2.5
+        canvasScroll.minMagnification = 0.5
+        canvasScroll.maxMagnification = 2.0
         canvasScroll.magnification = 1.0
+        canvasScroll.scrollerStyle = .overlay
+        canvasScroll.horizontalScrollElasticity = .allowed
+        canvasScroll.verticalScrollElasticity = .allowed
+        canvasScroll.autohidesScrollers = true
         canvasScroll.documentView = canvas
         canvasPage.addSubview(canvasScroll)
 
@@ -552,26 +658,33 @@ final class PanelController: NSObject, NSWindowDelegate {
                 PanelController.shared.reload()
             }
         }
+        map3D.onChangeModel = { [weak self] s in
+            self?.changeSeatModel(AgentNodeModel(
+                session: s.session, id: s.id, role: s.role == "subagent" ? "worker" : s.role,
+                title: s.title, subtitle: s.subtitle, detail: s.detail, status: s.status,
+                teamLabel: "", accent: PongTheme.magenta, origin: .zero
+            ))
+        }
         // Side pad: peer on the same plane
         // - orch/worker → new top-level agent
         // - subagent → another sub under the same parent (same SUB level, not nested)
         map3D.onPlus = { [weak self] s in
             guard let self else { return }
             if s.role == "conductor" || s.role == "worker" {
-                self.addWorker(to: s.session, parentId: nil, parentLabel: nil)
+                self.addWorker(to: s.session, parentId: nil, parentLabel: nil, guide: true)
             } else if s.role == "subagent" {
                 let parent = s.parentId
                 let entry = PairState.loadPairsDb()[s.session] as? [String: Any] ?? [:]
                 let lab = parent.flatMap { pid in
                     Workers.list(from: entry).first(where: { ($0["id"] as? String) == pid })?["label"] as? String
                 }
-                self.addWorker(to: s.session, parentId: parent, parentLabel: lab ?? parent)
+                self.addWorker(to: s.session, parentId: parent, parentLabel: lab ?? parent, guide: true)
             }
         }
         // Under-cube pad: only top-level agents → SUB deck under them
         map3D.onAddSub = { [weak self] s in
             guard s.role == "worker" else { return }
-            self?.addWorker(to: s.session, parentId: s.id, parentLabel: s.title)
+            self?.addWorker(to: s.session, parentId: s.id, parentLabel: s.title, guide: true)
         }
         map3D.onMinus = { [weak self] s in
             self?.killModel(AgentNodeModel(
@@ -582,10 +695,14 @@ final class PanelController: NSObject, NSWindowDelegate {
             ))
         }
         canvasPage.addSubview(map3D)
+        canvasPage.map3D = map3D
+        // Phase 0: left HUD + legend float over both 2D and 3D (not trapped in map3D)
+        map3D.promoteSharedHUD(to: canvasPage)
 
         canvasToolbar = glassBar()
         canvasPage.addSubview(canvasToolbar)
-        // One bar: Orbit/Move (left, with 2D) · zoom · Link terminals · Architecture · New team
+        // One bar: Orbit/Move · 2D/3D · zoom · Link · Architecture · Reset position (2D) · New team
+        // (Guide lives on the map sparkle FAB / app menu — not on this toolbar)
         canvasToolbar.addSubview(pillButton("Orbit", #selector(orbitModePressed)))
         canvasToolbar.addSubview(pillButton("Move", #selector(moveModePressed)))
         canvasToolbar.addSubview(pillButton("3D", #selector(toggleMapMode)))
@@ -593,6 +710,7 @@ final class PanelController: NSObject, NSWindowDelegate {
         canvasToolbar.addSubview(pillButton("+", #selector(zoomInPressed)))
         canvasToolbar.addSubview(pillButton("Link terminals", #selector(linkPressed)))
         canvasToolbar.addSubview(pillButton("Architecture", #selector(architecturePressed)))
+        canvasToolbar.addSubview(pillButton("Reset position", #selector(arrangeTeamsPressed)))
         canvasToolbar.addSubview(accentButton("New team", #selector(newTeamPressed)))
 
         canvasEmpty = emptyState(
@@ -635,17 +753,29 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     private func layoutCanvasPage() {
         let b = canvasPage.bounds
-        let mapFrame = b.insetBy(dx: 8, dy: 8)
+        // Map nearly full-bleed — chrome (toolbar + hint) floats tight at bottom
+        let mapFrame = b.insetBy(dx: 6, dy: 6)
         canvasScroll.frame = mapFrame
-        canvasScroll.frame.size.height = max(100, b.height - 24)
+        canvasScroll.frame.size.height = max(100, b.height - 12)
         map3D.frame = mapFrame
-        // Floating toolbar: hug content width, then center (no empty void on the right)
+        // Stack: [toolbar] then [hint under it] — no dead 124pt band
+        let barH: CGFloat = 40
+        let gap: CGFloat = 1
+        let hintH = Agent3DMapView.hintStripHeight
+        let bottomPad: CGFloat = 4
+        // Toolbar sits just above the map’s hint strip (hint is inside map3D at y≈2)
+        let barY = mapFrame.minY + bottomPad + hintH + gap
         let contentW = layoutGlassBar(canvasToolbar)
-        let tw = min(b.width - 24, max(120, contentW))
-        canvasToolbar.frame = NSRect(x: (b.width - tw) / 2, y: 20, width: tw, height: 44)
-        // Re-layout into final frame (same widths; ensures pads look even)
+        let tw = min(b.width - 20, max(120, contentW))
+        canvasToolbar.frame = NSRect(x: (b.width - tw) / 2, y: barY, width: tw, height: barH)
         _ = layoutGlassBar(canvasToolbar)
+        // Keep chrome above SceneKit; HUD/splitter last so widen grip stays hittable
+        canvasPage.addSubview(canvasToolbar)
         canvasEmpty.frame = NSRect(x: (b.width - 360) / 2, y: (b.height - 160) / 2, width: 360, height: 160)
+        map3D?.layoutPromotedHUD(in: b)
+        // After layoutPromotedHUD, re-assert toolbar above map but under? No — toolbar
+        // may cover bottom; splitter is on the left column edge so OK under toolbar.
+        // Ensure map3D is not re-added above HUD (frame set only).
     }
 
     private func applyMapMode() {
@@ -677,6 +807,10 @@ final class PanelController: NSObject, NSWindowDelegate {
                 if u == "ARCHITECTURE" {
                     b.isHidden = !use3DMap
                 }
+                // Reset position is 2D-only (flat multi grid)
+                if u == "RESET POSITION" || u == "ARRANGE TEAMS" || b.action == #selector(arrangeTeamsPressed) {
+                    b.isHidden = use3DMap
+                }
             }
             // Re-center after hide/show changes content width
             layoutCanvasPage()
@@ -685,13 +819,49 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     @objc private func toggleMapMode() {
         use3DMap.toggle()
+        AppAISettings.setPrefer3DMap(use3DMap)
         applyMapMode()
         if use3DMap {
             map3D.resetCamera()
             refreshCanvas(light: true)
         } else {
             refreshCanvas(light: true)
+            // Fit seats in view so 2D opens usable (not lost in empty space)
+            DispatchQueue.main.async { [weak self] in
+                self?.fitViewportToNodes()
+            }
         }
+    }
+
+    /// Ghost seats so first-open 3D still sells the product (not a blank void).
+    private static func previewConstellationSeats() -> [Seat3D] {
+        let sess = "preview"
+        return [
+            Seat3D(
+                session: sess, id: "c1", role: "conductor",
+                title: "Orchestrator", subtitle: "plans · routes · verifies",
+                detail: "Your conductor seat", status: "idle", parentId: nil,
+                openJobs: 0, flowHint: "", missionRole: "orchestrator"
+            ),
+            Seat3D(
+                session: sess, id: "w1", role: "worker",
+                title: "Coder", subtitle: "implements · tests",
+                detail: "Worker seat", status: "idle", parentId: nil,
+                openJobs: 0, flowHint: "", missionRole: "coder"
+            ),
+            Seat3D(
+                session: sess, id: "w2", role: "worker",
+                title: "Reviewer", subtitle: "reviews · rejects soft claims",
+                detail: "Worker seat", status: "idle", parentId: nil,
+                openJobs: 0, flowHint: "", missionRole: "reviewer"
+            ),
+            Seat3D(
+                session: sess, id: "you", role: "human",
+                title: "You", subtitle: "human console",
+                detail: "Stay in the loop", status: "idle", parentId: "c1",
+                openJobs: 0, flowHint: "", missionRole: "human"
+            ),
+        ]
     }
 
     private func layoutMissionPage() {
@@ -725,6 +895,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             case "ORBIT", "MOVE": w = 56
             case "LINK TERMINALS": w = 118
             case "ARCHITECTURE": w = 100
+            case "RESET POSITION", "ARRANGE TEAMS": w = 118
             case "NEW TEAM": w = 96
             default: w = max(48, CGFloat(title.count) * 8 + 20)
             }
@@ -745,25 +916,38 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func go(_ d: Destination) {
         selected = d
         styleRail()
+        styleTopTabs()
         canvasPage.isHidden = d != .canvas
         missionPage.isHidden = d != .mission
         setupPage.isHidden = d != .setup
         // Design: pause 3D while Mission/Setup are showing
         if use3DMap {
             map3D.setMapPlaying(d == .canvas)
-            map3D.isHidden = pairsEmptyOrNoMap() || d != .canvas
+            map3D.isHidden = d != .canvas
         }
         reload()
     }
 
+    /// Human chat job chip → Mission tab.
+    func goToMission() {
+        go(.mission)
+    }
+
+    /// Push top-bar team focus into the human console (lock orch target).
+    private func syncHumanFocusToMap() {
+        map3D?.setFocusedTeamSession(selectedSession)
+    }
+
     private func pairsEmptyOrNoMap() -> Bool {
-        PairState.listPairs().isEmpty || !use3DMap
+        // Empty teams still show 3D preview constellation (product promise)
+        !use3DMap
     }
 
     // MARK: Data reload
 
-    @objc private func reloadPressed() { reload() }
+    @objc private func reloadPressed() { hardRefresh() }
 
+    /// Soft reload (poll / navigation) — file cache + light canvas.
     private func reload() {
         updateStatus()
         fillTeamPopup()
@@ -773,6 +957,64 @@ final class PanelController: NSObject, NSWindowDelegate {
         case .setup: paintSetup()
         }
         layoutAll()
+    }
+
+    /// Top-right ↻ — force control-plane snapshot + full UI rebuild.
+    private func hardRefresh() {
+        guard !hardRefreshInFlight else { return }
+        hardRefreshInFlight = true
+        refreshBtn?.isEnabled = false
+        statusText.stringValue = "Refreshing…"
+        statusDot.layer?.backgroundColor = PongTheme.blue.cgColor
+        PairState.invalidatePairsCache()
+        // Allow a concurrent async writer to finish; we force our own snapshot pass
+        snapshotRefreshInFlight = false
+        Pong.log("refresh hard begin selected=\(selected.rawValue)")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Force regenerate snapshot.json (not only re-read a stale file)
+            let out = Pong.sh(
+                "export PATH=\"$HOME/bin:/opt/homebrew/bin:$PATH\"; " +
+                "pong snapshot --compact 2>/dev/null | head -c 500000"
+            )
+            var obj: [String: Any]?
+            if let data = out.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               parsed["contract_version"] != nil || parsed["teams"] != nil {
+                obj = parsed
+            }
+            // Best-effort write path if compact stdout failed but CLI still refreshed the file
+            if obj == nil {
+                _ = Pong.sh("export PATH=\"$HOME/bin:/opt/homebrew/bin:$PATH\"; pong snapshot >/dev/null 2>&1")
+                let file = Pong.loadJSON(Pong.stateDir + "/snapshot.json")
+                if !file.isEmpty { obj = file }
+            }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let obj { self.lastSnapshot = obj }
+                self.updateStatus()
+                self.fillTeamPopup()
+                switch self.selected {
+                case .canvas:
+                    self.refreshCanvas(light: false)
+                case .mission:
+                    self.paintMission()
+                case .setup:
+                    self.paintSetup()
+                }
+                self.layoutAll()
+                self.hardRefreshInFlight = false
+                self.refreshBtn?.isEnabled = true
+                // Brief “done” flash then restore normal status
+                self.statusText.stringValue = "Refreshed"
+                self.statusDot.layer?.backgroundColor = PongTheme.live.cgColor
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+                    self?.updateStatus()
+                }
+                Pong.log("refresh hard done teams=\((obj?["teams"] as? [Any])?.count ?? -1)")
+            }
+        }
     }
 
     private func startPoll() {
@@ -797,7 +1039,15 @@ final class PanelController: NSObject, NSWindowDelegate {
             }
             self.updateStatus()
             if self.selected == .mission { self.paintMission() }
-            if self.selected == .canvas { self.refreshCanvas(light: true) }
+            if self.selected == .canvas {
+                self.refreshCanvas(light: true)
+                // Poll human asks for focused team without opening Focus window
+                self.map3D?.pollHumanConsole()
+            }
+            // Proactive Guide: situation detectors (ghosts, no-subs, stalled jobs)
+            let pairs = PairState.listPairs()
+            let snap = Pong.loadJSON(Pong.stateDir + "/snapshot.json")
+            GuideCoach.tick(snapshot: snap.isEmpty ? nil : snap, pairs: pairs)
         }
         RunLoop.main.add(t, forMode: .default)
         poll = t
@@ -850,10 +1100,12 @@ final class PanelController: NSObject, NSWindowDelegate {
             teamPopup.selectItem(at: 0)
             selectedSession = pairs.count > 1 ? "__all__" : pairs[0]
         }
+        syncHumanFocusToMap()
     }
 
     @objc private func teamChanged() {
         selectedSession = teamPopup.selectedItem?.representedObject as? String
+        syncHumanFocusToMap()
         refreshCanvas()
     }
 
@@ -862,25 +1114,72 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func refreshCanvas(light: Bool = false) {
         if canvasDragging { return }
         let pairs = PairState.listPairs()
-        canvasEmpty.isHidden = !pairs.isEmpty
-        canvasToolbar.isHidden = pairs.isEmpty
-        map3D.isHidden = pairs.isEmpty || !use3DMap
-        canvasScroll.isHidden = pairs.isEmpty || use3DMap
-        guard !pairs.isEmpty else { return }
+        // Empty state: keep 3D constellation + toolbar; hide flat empty card
+        canvasEmpty.isHidden = true
+        canvasToolbar.isHidden = false
+        map3D.isHidden = !use3DMap || selected != .canvas
+        // Keep 2D scroll visible even with zero teams so the workplace is always panable
+        canvasScroll.isHidden = use3DMap || selected != .canvas
+        if pairs.isEmpty {
+            if use3DMap {
+                map3D.reload(seats: Self.previewConstellationSeats(), multiTeam: false)
+                map3D.setMapPlaying(true)
+            }
+            if !use3DMap {
+                canvas.setFrameSize(CanvasLayout.minCanvas)
+            }
+            return
+        }
 
         let multi = selectedSession == "__all__" || (selectedSession == nil && pairs.count > 1)
         let showPairs: [String] = multi ? pairs : [selectedSession ?? pairs[0]].compactMap { $0 }
 
-        let size = NSSize(
-            width: max(2200, canvasScroll.contentSize.width + 800 + CGFloat(max(0, showPairs.count - 1)) * 520),
-            height: max(1600, canvasScroll.contentSize.height + 600)
-        )
-        if !light { canvas.setFrameSize(size) }
+        // Start from a modest document; grow to fit seats after layout
+        var size = CanvasLayout.minCanvas
+        if multi {
+            // Grid pitch (see CanvasLayout.multiPitch*) — orch + workers column without overlap
+            let cols = CanvasLayout.multiCols
+            let rows = max(1, (showPairs.count + cols - 1) / cols)
+            size.width = min(
+                CanvasLayout.maxCanvas.width,
+                max(CanvasLayout.minCanvas.width,
+                    CanvasLayout.hudClearX + CGFloat(min(cols, showPairs.count)) * CanvasLayout.multiPitchX + CanvasLayout.workplacePad)
+            )
+            size.height = min(
+                CanvasLayout.maxCanvas.height,
+                max(CanvasLayout.minCanvas.height,
+                    CanvasLayout.hudClearY + CGFloat(rows) * CanvasLayout.multiPitchY + CanvasLayout.workplacePad)
+            )
+        }
+        canvas.setFrameSize(size)
 
         let snap = snapshot()
         var models: [AgentNodeModel] = []
         var seats3D: [Seat3D] = []
-        let posMap = CanvasLayout.positions(for: multi ? nil : showPairs.first)
+        var posMap = CanvasLayout.positions(for: multi ? nil : showPairs.first)
+        // Multi: unstack teams that share nearly-identical conductor slots (bare-key bug residue)
+        if multi {
+            if CanvasLayout.unstackOverlappingTeams(&posMap, sessions: showPairs) {
+                for (key, p) in posMap where key.contains("::") {
+                    let parts = key.components(separatedBy: "::")
+                    if parts.count >= 2 {
+                        CanvasLayout.saveSeat(session: parts[0], nodeId: parts[1], origin: p)
+                    }
+                }
+            }
+        } else if CanvasLayout.compactIfSpread(&posMap, multi: false) {
+            // Single-team only: heal pathological void scatter
+            for (key, p) in posMap {
+                if key.contains("::") {
+                    let parts = key.components(separatedBy: "::")
+                    if parts.count >= 2 {
+                        CanvasLayout.saveSeat(session: parts[0], nodeId: parts[1], origin: p)
+                    }
+                } else if let sess = showPairs.first {
+                    CanvasLayout.saveSeat(session: sess, nodeId: key, origin: p)
+                }
+            }
+        }
 
         for (ti, session) in showPairs.enumerated() {
             let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
@@ -900,14 +1199,19 @@ final class PanelController: NSObject, NSWindowDelegate {
                 session: session, nodeId: condId, multi: multi, map: posMap,
                 teamIndex: ti, role: "conductor", workerIndex: 0, canvas: size)
             let cAccent = TerminalTheme.Colors.from(entry["colors"])?.asNSColors.hi ?? PongTheme.blue
-            // Orchestrator is NOT always active: only busy when the team has live work
-            // (running/notified jobs or human takeover) — not merely "team exists" or queued.
+            // Orchestrator active only for real in-flight work (same rule as floor dots).
+            // Queued jobs → calm “busy”; finished → idle (no pulse/ACTIVE face).
             let teamSnapEarly = (snap?["teams"] as? [[String: Any]])?
                 .first(where: { ($0["session"] as? String) == session })
-            let openJobsList = ((teamSnapEarly?["jobs"] as? [String: Any])?["open"] as? [[String: Any]]) ?? []
+            // Prefer activity_open (age-filtered in snapshot); fall back to open.
+            let jobsBag = teamSnapEarly?["jobs"] as? [String: Any]
+            let openJobsList: [[String: Any]] = {
+                if let act = jobsBag?["activity_open"] as? [[String: Any]] { return act }
+                return (jobsBag?["open"] as? [[String: Any]]) ?? []
+            }()
             var condOpen = 0
-            var condBusy = false       // seat glow (queued ok)
-            var condRunning = false    // real in-flight → floor packets
+            var condBusy = false       // queued / soft (no pulse)
+            var condRunning = false    // real in-flight → packets + primitive pulse
             var condHuman = false
             var condHint = ""
             for j in openJobsList {
@@ -940,7 +1244,7 @@ final class PanelController: NSObject, NSWindowDelegate {
             let cStatus: String = {
                 if stowed { return "hidden" }
                 if condHuman { return "human" }
-                // "running" drives floor packets; "busy" is seat glow only
+                // "running" → pulse + packets; "busy" → quiet; none → idle
                 if condRunning { return "running" }
                 if condBusy { return "busy" }
                 return "idle"
@@ -949,15 +1253,19 @@ final class PanelController: NSObject, NSWindowDelegate {
                 session: session, id: condId, role: "conductor",
                 title: condLabel, subtitle: "\(condType) · conductor seat",
                 detail: detail, status: cStatus,
-                teamLabel: multi ? display : "",
-                accent: cAccent, origin: cOrigin
+                // Always show team display name over the orchestrator (single + multi)
+                teamLabel: display,
+                accent: cAccent, origin: cOrigin,
+                parentId: nil, openJobs: condOpen, flowHint: condHint,
+                missionRole: "orchestrator"
             ))
             seats3D.append(Seat3D(
                 session: session, id: condId, role: "conductor",
                 title: condLabel, subtitle: "\(condType) · conductor",
                 detail: detail, status: cStatus, parentId: nil,
                 openJobs: condOpen, flowHint: condHint,
-                missionRole: "orchestrator"
+                missionRole: "orchestrator",
+                accent: cAccent
             ))
 
             let teamSnap = (snap?["teams"] as? [[String: Any]])?.first(where: { ($0["session"] as? String) == session })
@@ -981,10 +1289,16 @@ final class PanelController: NSObject, NSWindowDelegate {
                 // Ephemeral permanent-roster workers vanish from the map when idle
                 if isEphWorker && !mapVisible { continue }
 
-                // Job preview + precise status for map flow dots:
-                // running/notified → "running" (packets), human → "human",
-                // queued open only → "busy" (glow, no packets), else hint/idle.
-                if let openList = ((teamSnap?["jobs"] as? [String: Any])?["open"] as? [[String: Any]]) {
+                // Job preview + precise status for map (dots + primitive pulse share this):
+                // running/notified → "running", human → "human",
+                // queued only → "busy" (calm seat — no pulse/dots), none → "idle".
+                // Prefer activity_open (age-filtered) so stale notified jobs don't keep seats ACTIVE.
+                let workerJobsBlob = teamSnap?["jobs"] as? [String: Any]
+                let workerOpenList: [[String: Any]]? = {
+                    if let act = workerJobsBlob?["activity_open"] as? [[String: Any]] { return act }
+                    return workerJobsBlob?["open"] as? [[String: Any]]
+                }()
+                if let openList = workerOpenList {
                     let mine = openList.filter {
                         (($0["worker"] as? String) ?? ($0["worker_id"] as? String)) == wid
                     }
@@ -995,7 +1309,7 @@ final class PanelController: NSObject, NSWindowDelegate {
                     }
                     let hasHuman = mine.contains {
                         let st = (($0["status"] as? String) ?? "").lowercased()
-                        return st.contains("human") || st.contains("ask")
+                        return st.contains("human") || st.contains("ask") || st.contains("takeover")
                     }
                     let hasRunning = mine.contains {
                         let st = (($0["status"] as? String) ?? "").lowercased()
@@ -1006,11 +1320,16 @@ final class PanelController: NSObject, NSWindowDelegate {
                     } else if hasRunning {
                         status = "running"
                     } else if openN > 0 || !mine.isEmpty {
-                        // Queued / waiting — seat can glow, floor dots stay off
+                        // Queued / waiting — quiet seat (no bob/ACTIVE)
                         status = "busy"
+                    } else {
+                        // Work finished — force calm (clear sticky busy/live hints)
+                        status = "idle"
                     }
                 } else if openN > 0 {
                     status = "busy"
+                } else if !status.lowercased().contains("human") {
+                    status = "idle"
                 }
                 let wdetail = Self.seatBlurb(role: "worker", type: typ, openJobs: openN, root: nil)
                 let origin = CanvasLayout.origin(
@@ -1034,23 +1353,26 @@ final class PanelController: NSObject, NSWindowDelegate {
                     }
                     return nil
                 }()
-                models.append(AgentNodeModel(
-                    session: session, id: wid, role: "worker",
-                    title: lab, subtitle: "\(typ) · worker seat",
-                    detail: wdetail, status: status,
-                    teamLabel: multi ? display : "",
-                    accent: accent, origin: origin
-                ))
                 let missionRole = (w["mission_role"] as? String)
                     ?? (w["role"] as? String)
                     ?? "coder"
+                models.append(AgentNodeModel(
+                    session: session, id: wid, role: role3,
+                    title: lab, subtitle: "\(typ) · \(MissionRole.parse(missionRole)?.title ?? "Agent")",
+                    detail: wdetail, status: status,
+                    teamLabel: multi ? display : "",
+                    accent: accent, origin: origin,
+                    parentId: resolvedParent, openJobs: openN, flowHint: flowHint,
+                    missionRole: missionRole
+                ))
                 seats3D.append(Seat3D(
                     session: session, id: wid, role: role3,
                     title: lab, subtitle: "\(typ) · \(MissionRole.parse(missionRole)?.title ?? "Agent")",
                     detail: wdetail, status: status, parentId: resolvedParent,
                     openJobs: openN, flowHint: flowHint,
                     missionRole: missionRole,
-                    ephemeral: isEphWorker
+                    ephemeral: isEphWorker,
+                    accent: accent
                 ))
             }
 
@@ -1146,6 +1468,13 @@ final class PanelController: NSObject, NSWindowDelegate {
         if use3DMap {
             map3D.reload(seats: seats3D, multiTeam: multi)
         } else {
+            // Size document to seat cluster + pan padding (fast draw, easy navigation)
+            let pts = models.filter { $0.role != "add" && $0.role != "add-sub" }.map(\.origin)
+            let fitted = CanvasLayout.workplaceSize(fitting: pts, card: AgentNodeView.size)
+            if fitted.width > size.width || fitted.height > size.height {
+                size = fitted
+                canvas.setFrameSize(size)
+            }
             canvas.reload(models: models, multiTeam: multi)
         }
     }
@@ -1212,7 +1541,9 @@ final class PanelController: NSObject, NSWindowDelegate {
                 self?.snapshotRefreshInFlight = false
                 if let obj {
                     self?.lastSnapshot = obj
+                    // Apply fresh seat activity immediately (was mission-only → ~poll-cycle lag)
                     if self?.selected == .mission { self?.paintMission() }
+                    if self?.selected == .canvas { self?.refreshCanvas(light: true) }
                 }
             }
         }
@@ -1280,6 +1611,55 @@ final class PanelController: NSObject, NSWindowDelegate {
         rule.layer?.backgroundColor = NSColor(calibratedRed: 0.51, green: 0.59, blue: 0.63, alpha: 0.16).cgColor
         head.addSubview(rule)
         push(head, 72)
+
+        // Mission Q&A + cron entry (Guide-grounded; chips use live snapshot)
+        let askH: CGFloat = 118
+        let askCard = tacticalCard(width: boxW, height: askH, accent: PongTheme.blue)
+        let askTitle = Self.label("Ask about this mission…",
+            frame: NSRect(x: 16, y: askH - 28, width: 240, height: 16), size: 12, secondary: false)
+        askTitle.font = PongTheme.font(12, weight: .semibold)
+        askCard.addSubview(askTitle)
+        let cronBtn = NSButton(title: "Describe a schedule…", target: self, action: #selector(missionDescribeCron))
+        cronBtn.bezelStyle = .rounded
+        cronBtn.font = PongTheme.font(11, weight: .medium)
+        cronBtn.frame = NSRect(x: boxW - 168, y: askH - 32, width: 152, height: 24)
+        askCard.addSubview(cronBtn)
+        let chips = ["Who is idle?", "Any rogue/stale jobs?", "What should I do next?", "Why is orch active?"]
+        var chipX: CGFloat = 16
+        for (i, chip) in chips.enumerated() {
+            let b = NSButton(title: chip, target: self, action: #selector(missionAskChip(_:)))
+            b.bezelStyle = .rounded
+            b.font = PongTheme.font(10, weight: .medium)
+            b.identifier = NSUserInterfaceItemIdentifier(chip)
+            b.tag = i
+            let w = max(88, CGFloat(chip.count) * 6.2 + 20)
+            b.frame = NSRect(x: chipX, y: askH - 58, width: min(w, 160), height: 22)
+            askCard.addSubview(b)
+            chipX += b.frame.width + 6
+        }
+        let askField = NSTextField(frame: NSRect(x: 16, y: 36, width: boxW - 100, height: 24))
+        askField.placeholderString = "Ask about idle seats, stuck jobs, orch pulse…"
+        askField.font = PongTheme.font(12)
+        askField.isBordered = true
+        askField.bezelStyle = .roundedBezel
+        askField.identifier = NSUserInterfaceItemIdentifier("missionAskField")
+        askCard.addSubview(askField)
+        let askSend = NSButton(title: "Ask", target: self, action: #selector(missionAskSend))
+        askSend.bezelStyle = .rounded
+        askSend.font = PongTheme.font(11, weight: .semibold)
+        askSend.frame = NSRect(x: boxW - 76, y: 34, width: 60, height: 26)
+        askCard.addSubview(askSend)
+        let replyText = missionAskLastReply.isEmpty
+            ? "Answers use live snapshot (status_hint, open jobs, ages)."
+            : missionAskLastReply
+        let replyL = Self.label(replyText,
+            frame: NSRect(x: 16, y: 6, width: boxW - 32, height: 26), size: 11, secondary: true)
+        replyL.maximumNumberOfLines = 2
+        replyL.lineBreakMode = .byTruncatingTail
+        replyL.identifier = NSUserInterfaceItemIdentifier("missionAskReply")
+        askCard.addSubview(replyL)
+        // Stash field for send action (paint rebuilds; re-find by identifier when sending)
+        push(askCard, askH)
 
         // Human-needed banner (orange path → Focus)
         if !humanSessions.isEmpty {
@@ -2058,6 +2438,51 @@ final class PanelController: NSObject, NSWindowDelegate {
 
     @objc private func goCanvas() { go(.canvas) }
 
+    @objc private func missionDescribeCron() {
+        let sess = selectedSession.flatMap { $0 == "__all__" ? nil : $0 } ?? PairState.listPairs().first
+        // Switch to map so Guide FAB is on-screen, then open cron chat
+        go(.canvas)
+        DispatchQueue.main.async {
+            AppAIChatBubble.shared.beginCronWizard(session: sess)
+        }
+    }
+
+    @objc private func missionAskChip(_ sender: NSButton) {
+        let q = sender.identifier?.rawValue ?? sender.title
+        runMissionAsk(q)
+    }
+
+    @objc private func missionAskSend() {
+        // Find field on mission body
+        var text = ""
+        func findField(_ v: NSView) {
+            if let f = v as? NSTextField, f.identifier?.rawValue == "missionAskField" {
+                text = f.stringValue
+            }
+            for c in v.subviews { findField(c) }
+        }
+        findField(missionBody)
+        runMissionAsk(text)
+    }
+
+    private func runMissionAsk(_ question: String) {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        // Instant grounded reply on Mission page + open Guide for follow-up
+        let grounded = GuideCoach.answerMissionQuestion(q)
+        missionAskLastReply = grounded
+        AppAIChatBubble.shared.beginMissionAsk(q)
+        // Refresh reply line without full paint when possible
+        func setReply(_ v: NSView) {
+            if let l = v as? NSTextField, l.identifier?.rawValue == "missionAskReply" {
+                l.stringValue = grounded
+            }
+            for c in v.subviews { setReply(c) }
+        }
+        setReply(missionBody)
+        Pong.log("mission ask q=\(String(q.prefix(80)))")
+    }
+
     @objc private func missionFocusFirstHuman() {
         let snap = snapshot() ?? [:]
         let teams = (snap["teams"] as? [[String: Any]]) ?? []
@@ -2104,7 +2529,10 @@ final class PanelController: NSObject, NSWindowDelegate {
     private func paintSetup() {
         setupBody.subviews.forEach { $0.removeFromSuperview() }
         let W: CGFloat = max(420, setupScroll.contentSize.width > 20 ? setupScroll.contentSize.width - 8 : 480)
-        var y: CGFloat = 640
+        let accessText = Self.accessMapSummary()
+        let accessLines = CGFloat(accessText.components(separatedBy: "\n").count)
+        let accessH = min(280, max(120, 36 + accessLines * 16))
+        var y: CGFloat = 820 + accessH
         setupBody.setFrameSize(NSSize(width: W, height: y))
 
         // Design: large title + muted subtitle
@@ -2123,6 +2551,18 @@ final class PanelController: NSObject, NSWindowDelegate {
         rule.layer?.backgroundColor = NSColor(calibratedRed: 0.51, green: 0.59, blue: 0.63, alpha: 0.16).cgColor
         setupBody.addSubview(rule)
         y -= 28
+
+        // Access / MCP map — clear view of who can use tools
+        let accessCard = tacticalCard(width: W - 20, height: accessH, accent: PongTheme.limeAction.withAlphaComponent(0.45))
+        accessCard.setFrameOrigin(NSPoint(x: 0, y: y - accessH))
+        accessCard.addSubview(Self.label("Access · MCP · permissions", frame: NSRect(x: 16, y: accessH - 28, width: W - 48, height: 18), bold: true, size: 14))
+        let accessBody = Self.label(accessText,
+            frame: NSRect(x: 16, y: 12, width: W - 48, height: accessH - 44), size: 11, secondary: true)
+        accessBody.font = PongTheme.mono(10)
+        accessBody.maximumNumberOfLines = 0
+        accessCard.addSubview(accessBody)
+        setupBody.addSubview(accessCard)
+        y -= accessH + 16
 
         // Lime-accent primary card
         let card1 = actionCard(
@@ -2180,6 +2620,76 @@ final class PanelController: NSObject, NSWindowDelegate {
         appB.frame = NSRect(x: W - 100, y: 18, width: 64, height: 28)
         appCard.addSubview(appB)
         setupBody.addSubview(appCard)
+        y -= 80
+
+        // Sequential account switch (one active login per provider CLI)
+        let authCard = tacticalCard(width: W - 20, height: 88, accent: PongTheme.limeAction.withAlphaComponent(0.3))
+        authCard.setFrameOrigin(NSPoint(x: 0, y: y - 88))
+        authCard.addSubview(Self.label("Provider accounts", frame: NSRect(x: 16, y: 58, width: 220, height: 16), bold: true, size: 13))
+        authCard.addSubview(Self.label("One login per CLI (Grok/Claude/Hermes). Switch reopens Terminal sign-in.",
+            frame: NSRect(x: 16, y: 28, width: W - 48, height: 28), size: 11, secondary: true))
+        let switchB = pillButton("Switch account…", #selector(switchAccountPressed))
+        switchB.frame = NSRect(x: W - 150, y: 18, width: 120, height: 28)
+        authCard.addSubview(switchB)
+        setupBody.addSubview(authCard)
+    }
+
+    @objc private func switchAccountPressed() {
+        if let d = NSApp.delegate as? AppDelegate {
+            d.switchProviderAccount()
+        }
+    }
+
+    /// Who has MCP / tools / env scope — readable for humans.
+    private static func accessMapSummary() -> String {
+        var lines: [String] = []
+        lines.append("MCP = tools a model can call (browser, files, APIs…).")
+        lines.append("Ban MCP on a seat → that model cannot use tools.")
+        lines.append("Other seats keep their own rules. Scope is per agent.")
+        lines.append("")
+        let pairs = PairState.listPairs()
+        if pairs.isEmpty {
+            lines.append("No live teams yet.")
+            return lines.joined(separator: "\n")
+        }
+        let db = PairState.loadPairsDb()
+        var mcpOk = 0, mcpBan = 0
+        for sess in pairs {
+            let entry = db[sess] as? [String: Any] ?? [:]
+            let name = (entry["display_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sess
+            let teamPerm = entry["permissions"] as? [String: Any] ?? PairState.defaultPermissions()
+            let teamBan = (teamPerm["ban_mcp"] as? Bool) == true
+            lines.append("▸ \(name)")
+            let cond = entry["conductor"] as? [String: Any] ?? [:]
+            let cLab = (cond["label"] as? String) ?? "Boss"
+            let cType = (cond["type"] as? String) ?? "?"
+            lines.append("  · \(cLab) (\(cType))  MCP: \(teamBan ? "banned" : "allowed")  env: team policy")
+            if teamBan { mcpBan += 1 } else { mcpOk += 1 }
+            for w in Workers.list(from: entry) {
+                let id = (w["id"] as? String) ?? "?"
+                let lab = (w["label"] as? String) ?? id
+                let typ = (w["type"] as? String) ?? "?"
+                let wp = w["permissions"] as? [String: Any] ?? teamPerm
+                let ban = (wp["ban_mcp"] as? Bool) == true
+                let net = (wp["ban_network"] as? Bool) == true
+                let repo = (wp["repo_only"] as? Bool) == true
+                var flags: [String] = []
+                flags.append(ban ? "MCP off" : "MCP on")
+                if net { flags.append("no network") }
+                if repo { flags.append("repo only") }
+                lines.append("  · \(lab) (\(typ)/\(id))  \(flags.joined(separator: " · "))")
+                if ban { mcpBan += 1 } else { mcpOk += 1 }
+            }
+            // Env files hint
+            let root = (entry["project_root"] as? String) ?? ""
+            if !root.isEmpty {
+                lines.append("  · project: \(root)  (.env lives here if present)")
+            }
+            lines.append("")
+        }
+        lines.append("Totals: \(mcpOk) seat(s) MCP-on · \(mcpBan) MCP-banned")
+        lines.append("Edit: seat → Policy. Ban MCP on Hermes only keeps Claude tools alone.")
+        return lines.joined(separator: "\n")
     }
 
     private func actionCard(frame: NSRect, title: String, body: String, button: String, action: Selector, accent: NSColor = PongTheme.amber) -> NSView {
@@ -2289,6 +2799,38 @@ final class PanelController: NSObject, NSWindowDelegate {
         map3D?.openArchitectureSheet()
     }
 
+    /// 2D multi: force every team onto distinct default grid slots (persists scoped positions).
+    @objc private func arrangeTeamsPressed() {
+        guard !use3DMap else { return }
+        let pairs = PairState.listPairs()
+        guard !pairs.isEmpty else { return }
+        // Prefer all-teams view so the re-grid is visible
+        if pairs.count > 1 { selectedSession = "__all__" }
+
+        var posMap = CanvasLayout.positions(for: nil)
+        let before = posMap
+        let didChange = CanvasLayout.arrangeTeams(&posMap, sessions: pairs)
+
+        var moved = 0
+        for (key, p) in posMap where key.contains("::") {
+            let parts = key.components(separatedBy: "::")
+            guard parts.count >= 2 else { continue }
+            if let old = before[key] {
+                if hypot(old.x - p.x, old.y - p.y) >= 1 { moved += 1 }
+            } else {
+                moved += 1
+            }
+            CanvasLayout.saveSeat(session: parts[0], nodeId: parts[1], origin: p)
+        }
+        CanvasLayout.scrubCanvasAllBareKeys()
+
+        reload()
+        DispatchQueue.main.async { [weak self] in
+            self?.fitViewportToNodes()
+        }
+        Pong.log("reset position n=\(pairs.count) changed=\(didChange) moved=\(moved)")
+    }
+
     @objc private func zoomInPressed() {
         if use3DMap {
             // Mild dolly-in on 3D camera if available; otherwise ignore
@@ -2353,24 +2895,26 @@ final class PanelController: NSObject, NSWindowDelegate {
             canvasScroll?.magnification = 1.0
             return
         }
-        let pad: CGFloat = 48
+        let pad: CGFloat = 64
         let target = box.insetBy(dx: -pad, dy: -pad)
+        // contentView.bounds.size is already in document coords (post-magnification)
+        scroll.magnification = 1.0
         let vis = scroll.contentView.bounds.size
         guard vis.width > 1, vis.height > 1, target.width > 1, target.height > 1 else { return }
+        // Prefer 1× if the cluster already fits; only zoom out when needed
         let sx = vis.width / target.width
         let sy = vis.height / target.height
-        var mag = min(sx, sy)
+        var mag = min(1.0, min(sx, sy))
         mag = min(scroll.maxMagnification, max(scroll.minMagnification, mag))
         scroll.magnification = mag
-        // Center document rect in clip view
-        let mid = NSPoint(x: target.midX, y: target.midY)
+        let vis2 = scroll.contentView.bounds.size
         var origin = NSPoint(
-            x: mid.x * mag - vis.width / 2,
-            y: mid.y * mag - vis.height / 2
+            x: target.midX - vis2.width / 2,
+            y: target.midY - vis2.height / 2
         )
         let doc = canvas.bounds.size
-        let maxX = max(0, doc.width * mag - vis.width)
-        let maxY = max(0, doc.height * mag - vis.height)
+        let maxX = max(0, doc.width - vis2.width)
+        let maxY = max(0, doc.height - vis2.height)
         origin.x = min(max(0, origin.x), maxX)
         origin.y = min(max(0, origin.y), maxY)
         scroll.contentView.setBoundsOrigin(origin)
@@ -2389,29 +2933,216 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Rename conductor or worker seat label from the map.
+    /// Rename + neon accent pick for conductor or worker (map primitive, glow, Terminal).
     private func renameSeat(_ m: AgentNodeModel) {
-        guard m.role == "conductor" || m.role == "worker" else { return }
+        // Subagents are mapped to "worker" by map/canvas callers; also accept raw subagent.
+        let isConductor = m.role == "conductor"
+        let isAgent = m.role == "worker" || m.role == "subagent"
+        guard isConductor || isAgent else { return }
         NSApp.activate(ignoringOtherApps: true)
+
+        let entry = PairState.loadPairsDb()[m.session] as? [String: Any] ?? [:]
+        let existingColors: TerminalTheme.Colors? = {
+            if isConductor { return TerminalTheme.Colors.from(entry["colors"]) }
+            let ws = Workers.list(from: entry)
+            return TerminalTheme.Colors.from(ws.first(where: { ($0["id"] as? String) == m.id })?["colors"])
+        }()
+        var selectedNeonId = PongNeonCatalog.matching(existingColors)?.id
+            ?? (isConductor ? "plasma" : "magenta")
+
         let a = NSAlert()
-        a.messageText = m.role == "conductor" ? "Rename conductor" : "Rename agent"
-        a.informativeText = "Display name on the map (does not change the process)."
+        a.messageText = isConductor ? "Rename orchestrator" : "Rename agent"
+        a.informativeText = "Display name + neon accent for the map cube, plane glow, and Terminal."
         a.addButton(withTitle: "Save")
         a.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 96))
+        let field = NSTextField(frame: NSRect(x: 0, y: 68, width: 320, height: 24))
         field.stringValue = m.title
-        field.placeholderString = m.role == "conductor" ? "e.g. Grok Build" : "e.g. Claude · Auth"
-        a.accessoryView = field
-        a.window.initialFirstResponder = field
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
-        if m.role == "conductor" {
-            Workers.setConductorLabel(pair: m.session, label: name)
-        } else {
-            Workers.setWorkerLabel(pair: m.session, workerId: m.id, label: name)
+        field.placeholderString = isConductor ? "e.g. Grok Build" : "e.g. Claude · Auth"
+        box.addSubview(field)
+
+        let swatchLabel = NSTextField(labelWithString: "Neon accent")
+        swatchLabel.font = PongTheme.labelFont(10)
+        swatchLabel.textColor = PongTheme.textSecondary
+        swatchLabel.frame = NSRect(x: 0, y: 48, width: 320, height: 14)
+        box.addSubview(swatchLabel)
+
+        let chipRow = NSStackView(frame: NSRect(x: 0, y: 8, width: 320, height: 34))
+        chipRow.orientation = .horizontal
+        chipRow.spacing = 8
+        chipRow.alignment = .centerY
+        var chipButtons: [NSButton] = []
+        let chipSize: CGFloat = 24
+        for sw in PongNeonCatalog.all {
+            let b = NSButton(frame: NSRect(x: 0, y: 0, width: chipSize, height: chipSize))
+            b.title = ""
+            b.image = nil
+            b.imagePosition = .imageOnly
+            b.bezelStyle = .shadowlessSquare
+            b.isBordered = false
+            b.setButtonType(.momentaryChange)
+            b.wantsLayer = true
+            b.layer?.masksToBounds = true
+            b.layer?.cornerRadius = chipSize / 2
+            b.layer?.backgroundColor = sw.highlightNS.cgColor
+            b.layer?.borderWidth = 1
+            b.layer?.borderColor = NSColor.black.withAlphaComponent(0.35).cgColor
+            b.toolTip = sw.name
+            b.identifier = NSUserInterfaceItemIdentifier(sw.id)
+            b.target = NeonChipTarget.shared
+            b.action = #selector(NeonChipTarget.chipPressed(_:))
+            b.translatesAutoresizingMaskIntoConstraints = false
+            b.widthAnchor.constraint(equalToConstant: chipSize).isActive = true
+            b.heightAnchor.constraint(equalToConstant: chipSize).isActive = true
+            chipRow.addArrangedSubview(b)
+            chipButtons.append(b)
         }
-        reload()
+        box.addSubview(chipRow)
+
+        func styleChips() {
+            for b in chipButtons {
+                let on = b.identifier?.rawValue == selectedNeonId
+                b.title = ""
+                b.imagePosition = .imageOnly
+                b.layer?.masksToBounds = true
+                b.layer?.cornerRadius = chipSize / 2
+                b.layer?.borderColor = (on ? PongSheetChrome.lime.cgColor : NSColor.black.withAlphaComponent(0.35).cgColor)
+                b.layer?.borderWidth = on ? 2.5 : 1
+                b.layer?.shadowOpacity = 0
+            }
+        }
+        NeonChipTarget.shared.onPick = { id in
+            selectedNeonId = id
+            styleChips()
+        }
+        styleChips()
+
+        a.accessoryView = box
+        a.window.initialFirstResponder = field
+        field.currentEditor()?.selectAll(nil)
+        DispatchQueue.main.async { field.selectText(nil) }
+        guard a.runModal() == .alertFirstButtonReturn else {
+            NeonChipTarget.shared.onPick = nil
+            return
+        }
+        NeonChipTarget.shared.onPick = nil
+
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nameChanged = !name.isEmpty && name != m.title
+        let swatch = PongNeonCatalog.swatch(id: selectedNeonId)
+            ?? PongNeonCatalog.all.first!
+        // Always persist color on Save (even if name unchanged)
+        if nameChanged {
+            if isConductor {
+                Workers.setConductorLabel(pair: m.session, label: name)
+            } else {
+                Workers.setWorkerLabel(pair: m.session, workerId: m.id, label: name)
+            }
+        } else if name.isEmpty {
+            return
+        }
+        let session = m.session
+        let seatId = m.id
+        let colors = swatch.colors
+        DispatchQueue.global(qos: .userInitiated).async {
+            if isConductor {
+                Workers.setPairColors(session, colors: colors, applyTheme: true)
+            } else {
+                Workers.setWorkerColors(pair: session, workerId: seatId, colors: colors, applyTheme: true)
+            }
+            DispatchQueue.main.async {
+                let displayName = nameChanged ? name : m.title
+                let gid = "\(session)::\(seatId)"
+                self.map3D?.applySeatTitle(globalId: gid, title: displayName)
+                self.reload()
+            }
+        }
+    }
+
+    /// Live CLI/model switch on a worker seat (2D cards + 3D module share this).
+    private func changeSeatModel(_ m: AgentNodeModel) {
+        guard m.role != "conductor", m.id != "c1" else {
+            let a = NSAlert()
+            a.messageText = "Orchestrator model switch"
+            a.informativeText = "Changing the orchestrator CLI live is not supported here — restart the team or use Architecture design for a new plan. Workers can switch via CLI on their card."
+            a.addButton(withTitle: "OK")
+            a.runModal()
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let entry = PairState.loadPairsDb()[m.session] as? [String: Any] ?? [:]
+        let ws = Workers.list(from: entry)
+        let cur = (ws.first(where: { ($0["id"] as? String) == m.id })?["type"] as? String) ?? ""
+        let models = WorkerType.all.filter { $0.id != "custom" }
+
+        let pick = NSAlert()
+        pick.messageText = "Switch CLI for \(m.title)"
+        pick.informativeText = "Current: \(WorkerType.resolved(cur.isEmpty ? "claude" : cur).label). Pick a new AI / CLI for seat \(m.id)."
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 26), pullsDown: false)
+        for t in models {
+            popup.addItem(withTitle: t.label)
+            popup.lastItem?.representedObject = t.id
+            if t.id == cur { popup.select(popup.lastItem) }
+        }
+        pick.accessoryView = popup
+        pick.addButton(withTitle: "Continue")
+        pick.addButton(withTitle: "Cancel")
+        guard pick.runModal() == .alertFirstButtonReturn else { return }
+        guard let newId = popup.selectedItem?.representedObject as? String else { return }
+        if newId.lowercased() == cur.lowercased() {
+            let same = NSAlert()
+            same.messageText = "Already \(WorkerType.resolved(newId).label)"
+            same.informativeText = "Pick a different model to switch."
+            same.addButton(withTitle: "OK")
+            same.runModal()
+            return
+        }
+
+        let confirm = NSAlert()
+        confirm.messageText = "Switch to \(WorkerType.resolved(newId).label)?"
+        confirm.informativeText =
+            "Seat \(m.id) will restart its agent process in the same terminal window.\n" +
+            "Mission role and architecture stay the same; a seat-prime prompt is re-injected."
+        confirm.alertStyle = .warning
+        confirm.addButton(withTitle: "Switch")
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+
+        let hist = NSAlert()
+        hist.messageText = "Paste previous model history?"
+        hist.informativeText =
+            "Capture a bounded scrollback from the current session and paste it into the new CLI with a clear header.\n\n" +
+            "Yes — last ~200 lines / ~14KB max.\nNo — clean start with seat prime only."
+        hist.addButton(withTitle: "Yes, paste history")
+        hist.addButton(withTitle: "No")
+        hist.addButton(withTitle: "Cancel")
+        let histResp = hist.runModal()
+        if histResp == .alertThirdButtonReturn { return }
+        let includeHistory = histResp == .alertFirstButtonReturn
+
+        let session = m.session
+        let seatId = m.id
+        PongLoadingOverlay.show(on: window, message: "Switching CLI…")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Workers.switchWorkerModel(
+                pair: session,
+                workerId: seatId,
+                newTypeId: newId,
+                includeHistory: includeHistory
+            )
+            DispatchQueue.main.async {
+                PongLoadingOverlay.hide()
+                if !result.ok {
+                    let err = NSAlert()
+                    err.messageText = "Model switch failed"
+                    err.informativeText = result.message
+                    err.addButton(withTitle: "OK")
+                    err.runModal()
+                }
+                self.reload()
+            }
+        }
     }
 
     private func killModel(_ m: AgentNodeModel) {
@@ -2480,19 +3211,19 @@ final class PanelController: NSObject, NSWindowDelegate {
     }
 
     private func addWorker(to session: String) {
-        addWorker(to: session, parentId: nil, parentLabel: nil)
+        addWorker(to: session, parentId: nil, parentLabel: nil, guide: false)
     }
 
-    /// `parentId` when set: subagent under that worker seat (3D SUB layer + parent_id in pairs).
-    private func addWorker(to session: String, parentId: String?, parentLabel: String?) {
+    /// `parentId` when set: helper under that worker seat (3D HELPERS layer + parent_id).
+    private func addWorker(to session: String, parentId: String?, parentLabel: String?, guide: Bool = false) {
         NSApp.activate(ignoringOtherApps: true)
         let a = NSAlert()
         if let parentLabel {
-            a.messageText = "Add subagent"
-            a.informativeText = "Under “\(parentLabel)” (\(parentId ?? "?")) — appears on the SUB layer in 3D."
+            a.messageText = "Add helper"
+            a.informativeText = "Under “\(parentLabel)” — a helper that reports back to them."
         } else {
-            a.messageText = "Add worker"
-            a.informativeText = "Launch a new worker CLI attached to this orchestrator."
+            a.messageText = "Add agent"
+            a.informativeText = "New teammate next to the boss. You’ll name them next."
         }
         for t in WorkerType.all where t.id != "custom" {
             a.addButton(withTitle: t.label)
@@ -2513,8 +3244,13 @@ final class PanelController: NSObject, NSWindowDelegate {
         }
         guard let wt = picked else { return }
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = Workers.addWorker(pair: session, type: wt, parentId: parentId)
-            DispatchQueue.main.async { self.reload() }
+            let newId = Workers.addWorker(pair: session, type: wt, parentId: parentId)
+            DispatchQueue.main.async {
+                self.reload()
+                if guide, let newId, !newId.isEmpty {
+                    AgentGuideTutorial.present(session: session, seatId: newId)
+                }
+            }
         }
     }
 }
@@ -2548,6 +3284,17 @@ final class MissionJobRow: NSView {
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .pointingHand)
+    }
+}
+
+/// Neon swatch chips in rename accessory (fixed catalog only).
+final class NeonChipTarget: NSObject {
+    static let shared = NeonChipTarget()
+    var onPick: ((String) -> Void)?
+
+    @objc func chipPressed(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue, !id.isEmpty else { return }
+        onPick?(id)
     }
 }
 

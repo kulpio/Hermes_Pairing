@@ -76,6 +76,19 @@ if [[ -d "$ROOT/resources/brand/cyberpong" ]]; then
 fi
 cp "$ROOT/resources/cyberpong-wordmark-dark.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/cyberpong-wordmark-light.png" "$RES/" 2>/dev/null || true
+# Self-contained control plane (fresh zip installs must not need setup.sh).
+# Exclude __pycache__/*.pyc: compiled bytecode embeds absolute source paths
+# (co_filename), which would leak /Users/... into the bundle AND evade the
+# sign-notarize hygiene grep (grep -I skips binary .pyc). Ship source only.
+if [[ -d "$ROOT/python/pong" ]]; then
+  mkdir -p "$RES/python"
+  rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' \
+    "$ROOT/python/pong/" "$RES/python/pong/"
+  # Belt-and-suspenders in case a stale cache slipped in before --exclude ran.
+  find "$RES/python" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+  find "$RES/python" -name '*.pyc' -delete 2>/dev/null || true
+  echo "→ Bundled python/pong into Resources (source only, no bytecode)"
+fi
 # Abstract tactical module textures (Imagine — conductor / worker / canvas void)
 cp "$ROOT/resources/tex-conductor.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/tex-worker.png" "$RES/" 2>/dev/null || true

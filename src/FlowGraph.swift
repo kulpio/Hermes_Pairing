@@ -125,15 +125,19 @@ enum FlowGraph {
     }
 
     static func save(pair: String, edges: [Edge]) {
-        var db = PairState.loadPairsDb()
-        var entry = db[pair] as? [String: Any] ?? [:]
-        entry["flow_graph"] = [
-            "edges": edges.map { $0.asDict() },
-            "updated": Date().timeIntervalSince1970,
-        ]
-        entry["updated"] = Date().timeIntervalSince1970
-        db[pair] = entry
-        Pong.writeJSON(PairState.pairsPath, db)
+        PairState.mutate(pair) { entry in
+            entry["flow_graph"] = [
+                "edges": edges.map { $0.asDict() },
+                "updated": Date().timeIntervalSince1970,
+            ]
+        }
+        // Keep bind card (who-is-who + architecture road) in sync after edits
+        DispatchQueue.global(qos: .utility).async {
+            let py = "import os,sys; home=os.path.expanduser('~'); "
+                + "sys.path.insert(0, home+'/.pong/lib'); "
+                + "from pong.state import write_bind_card; write_bind_card('\(pair)')"
+            Pong.sh("python3 -c \"\(py)\" >/dev/null 2>&1 || python3 $HOME/bin/hermes_pong.py write-bind --session \(pair) >/dev/null 2>&1 || true")
+        }
     }
 
     /// Reverse arrow: swap endpoints only. Do not toggle `dir` — from→to is the sole
@@ -299,15 +303,12 @@ enum FlowGraph {
 
 enum Map3DLayout {
     static func save(session: String, nodeId: String, x: Float, z: Float) {
-        var db = PairState.loadPairsDb()
-        var entry = db[session] as? [String: Any] ?? [:]
-        var map = entry["map3d_positions"] as? [String: [String: Any]] ?? [:]
-        map[nodeId] = ["x": Double(x), "z": Double(z)]
-        map["\(session)::\(nodeId)"] = ["x": Double(x), "z": Double(z)]
-        entry["map3d_positions"] = map
-        entry["updated"] = Date().timeIntervalSince1970
-        db[session] = entry
-        Pong.writeJSON(PairState.pairsPath, db)
+        PairState.mutate(session) { entry in
+            var map = entry["map3d_positions"] as? [String: [String: Any]] ?? [:]
+            map[nodeId] = ["x": Double(x), "z": Double(z)]
+            map["\(session)::\(nodeId)"] = ["x": Double(x), "z": Double(z)]
+            entry["map3d_positions"] = map
+        }
     }
 
     static func load(session: String, nodeId: String) -> (x: Float, z: Float)? {
@@ -521,7 +522,7 @@ final class FlowDesignSheetController: NSObject {
         done.autoresizingMask = [.minXMargin, .maxYMargin]
         root.addSubview(done)
 
-        let tip = NSTextField(labelWithString: "Jobs on disk stay source of truth — this designs who talks to whom.")
+        let tip = NSTextField(labelWithString: "Boss gives work → agents. Agents send results back. Drag the middle of a link to bend it — it sticks.")
         tip.font = PongTheme.mono(10)
         tip.textColor = PongTheme.textTertiary
         tip.frame = NSRect(x: 24, y: 18, width: w - 150, height: 16)
@@ -612,7 +613,7 @@ final class FlowDesignSheetController: NSObject {
             canvas.frame = NSRect(x: 16, y: 52, width: max(400, w - 32), height: max(280, h - 160))
         }
         let teamSeats = seats.isEmpty ? syntheticSeats(for: session) : seats
-        canvas.load(seats: teamSeats, flowEdges: edges)
+        canvas.load(seats: teamSeats, flowEdges: edges, session: session)
     }
 
     private func persistFromCanvas() {

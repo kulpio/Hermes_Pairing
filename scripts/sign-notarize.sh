@@ -27,19 +27,35 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # ---------- release hygiene (always runs, credentials or not) ----------
 echo "→ Release hygiene check"
 HYGIENE_BAD=0
-LEAKS="$(find "$APP" \( -name "venv" -o -name ".env*" -o -name ".wa-auth" -o -name "project_root" \) -print)"
+# Compiled Python bytecode leaks absolute source paths (co_filename) and evades
+# the text grep below (grep -I skips binaries) — reject it outright.
+LEAKS="$(find "$APP" \( -name "venv" -o -name ".env*" -o -name ".wa-auth" -o -name "project_root" -o -name "__pycache__" -o -name "*.pyc" \) -print)"
 if [[ -n "$LEAKS" ]]; then
   echo "  ✗ forbidden files in bundle:" >&2
   echo "$LEAKS" >&2
   HYGIENE_BAD=1
 fi
+# Text-file scan (source, plists, scripts).
 if grep -rIq "/Users/" "$APP" 2>/dev/null; then
-  echo "  ✗ absolute user paths in bundle:" >&2
+  echo "  ✗ absolute user paths in bundle (text):" >&2
   grep -rIl "/Users/" "$APP" >&2
   HYGIENE_BAD=1
 fi
+# Binary scan — the text grep skips Mach-O and any binary; strings-scan every
+# file so a leak baked into the executable or bytecode can't slip through.
+# FAIL on absolute /Users/ paths and the stale ~/src/Agent-Pong mirror.
+BIN_LEAKS="$(find "$APP" -type f -exec sh -c 'strings "$1" 2>/dev/null | grep -q -e "/Users/" -e "src/Agent-Pong" && echo "$1"' _ {} \;)"
+if [[ -n "$BIN_LEAKS" ]]; then
+  echo "  ✗ absolute /Users/ or stale Agent-Pong paths in bundle (binary/strings):" >&2
+  echo "$BIN_LEAKS" >&2
+  HYGIENE_BAD=1
+fi
+# WARN on $HOME-relative dev-tree literals compiled into the Mach-O (tracked
+# should-fix: gate behind #if DEBUG). Not a blocker — leaks layout, not the user.
+DEV_TREE="$(find "$APP" -type f -exec sh -c 'strings "$1" 2>/dev/null | grep -q "Personal/Projects/HermesPong" && echo "$1"' _ {} \;)"
+[[ -n "$DEV_TREE" ]] && echo "  ⚠ dev-tree path strings present (non-blocking):" && echo "$DEV_TREE"
 [[ "$HYGIENE_BAD" == "0" ]] || fail "hygiene check failed — rebuild without --dev and inspect the files above"
-echo "  ✓ bundle clean (no venv/.env*/.wa-auth/project_root, no /Users/ paths)"
+echo "  ✓ bundle clean (no venv/.env*/.wa-auth/project_root/pyc, no /Users/ or Agent-Pong paths)"
 
 find "$APP" -name ".DS_Store" -delete
 

@@ -519,6 +519,55 @@ struct HumanAsk: Equatable {
     let jobId: String?
 }
 
+/// Structured human-console turn (JSONL under human/<session>/chat.jsonl).
+struct HumanChatMessage: Equatable {
+    enum Kind: String {
+        case fromYou = "from_you"
+        case fromOrch = "from_orch"
+        case ask = "ask"
+        case status = "status"
+    }
+
+    let id: String
+    let kind: Kind
+    let text: String
+    let ts: TimeInterval
+    let jobId: String?
+    let seatId: String?
+    let files: [String]
+
+    func asDict() -> [String: Any] {
+        var d: [String: Any] = [
+            "id": id,
+            "kind": kind.rawValue,
+            "text": text,
+            "ts": ts,
+        ]
+        if let jobId, !jobId.isEmpty { d["job_id"] = jobId }
+        if let seatId, !seatId.isEmpty { d["seat_id"] = seatId }
+        if !files.isEmpty { d["files"] = files }
+        return d
+    }
+
+    static func fromDict(_ d: [String: Any]) -> HumanChatMessage? {
+        guard let kindRaw = d["kind"] as? String,
+              let kind = Kind(rawValue: kindRaw),
+              let text = d["text"] as? String else { return nil }
+        let id = (d["id"] as? String) ?? UUID().uuidString
+        let ts = (d["ts"] as? Double) ?? Date().timeIntervalSince1970
+        let files = (d["files"] as? [String]) ?? []
+        return HumanChatMessage(
+            id: id,
+            kind: kind,
+            text: text.trimmingCharacters(in: .whitespacesAndNewlines),
+            ts: ts,
+            jobId: d["job_id"] as? String,
+            seatId: d["seat_id"] as? String,
+            files: files
+        )
+    }
+}
+
 enum HumanAskDecision: String {
     case deny
     case acceptOnce = "accept_once"
@@ -909,6 +958,36 @@ final class HumanConsoleController: NSObject, NSWindowDelegate, NSTextViewDelega
         humanDir(session: session) + "/last_response.json"
     }
 
+    /// Strip agent dumps / job wrappers — show only the question text in the human panel.
+    static func questionOnly(_ raw: String) -> String {
+        var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Prefer explicit "Question:" / "Ask:" lines
+        for line in t.components(separatedBy: .newlines) {
+            let s = line.trimmingCharacters(in: .whitespaces)
+            let lower = s.lowercased()
+            if lower.hasPrefix("question:") || lower.hasPrefix("ask:") || lower.hasPrefix("q:") {
+                let cut = s.firstIndex(of: ":").map { s.index(after: $0) } ?? s.startIndex
+                let body = String(s[cut...]).trimmingCharacters(in: .whitespaces)
+                if !body.isEmpty { return String(body.prefix(400)) }
+            }
+        }
+        // Drop common dump markers
+        for marker in ["##WORKER_DONE##", "##CLAUDE_DONE##", "Acceptance:", "CLAIM:", "```"] {
+            if let r = t.range(of: marker) {
+                t = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        // First paragraph only
+        if let para = t.components(separatedBy: "\n\n").first {
+            t = para.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if t.count > 400 {
+            t = String(t.prefix(400))
+            if let sp = t.lastIndex(of: " ") { t = String(t[..<sp]) + "…" }
+        }
+        return t.isEmpty ? "Team needs your input." : t
+    }
+
     /// Load explicit pending_ask.json, else synthesize from open human jobs / worker hints.
     static func loadPendingAsk(session: String) -> HumanAsk? {
         guard !session.isEmpty else { return nil }
@@ -918,7 +997,7 @@ final class HumanConsoleController: NSObject, NSWindowDelegate, NSTextViewDelega
             return HumanAsk(
                 id: (file["id"] as? String) ?? "ask-\(session)",
                 session: session,
-                question: q.trimmingCharacters(in: .whitespacesAndNewlines),
+                question: questionOnly(q),
                 source: (file["source"] as? String) ?? "orchestrator",
                 jobId: file["job_id"] as? String
             )
@@ -932,6 +1011,7 @@ final class HumanConsoleController: NSObject, NSWindowDelegate, NSTextViewDelega
             let takeover = (j["human_takeover"] as? Bool) == true
             if st.contains("human") || st.contains("ask") || takeover {
                 let prev = (j["task_preview"] as? String)
+                    ?? (j["human_question"] as? String)
                     ?? (j["task"] as? String)
                     ?? "Job needs your decision"
                 let jid = (j["id"] as? String) ?? "job"
@@ -939,7 +1019,7 @@ final class HumanConsoleController: NSObject, NSWindowDelegate, NSTextViewDelega
                 return HumanAsk(
                     id: "job-\(jid)",
                     session: session,
-                    question: String(prev.prefix(280)),
+                    question: questionOnly(prev),
                     source: wid,
                     jobId: jid
                 )
@@ -950,11 +1030,14 @@ final class HumanConsoleController: NSObject, NSWindowDelegate, NSTextViewDelega
             if h.contains("human") || h.contains("takeover") || h.contains("ask") {
                 let id = (w["id"] as? String) ?? "w"
                 let lab = (w["label"] as? String) ?? id
-                let detail = (w["status_hint"] as? String) ?? "needs your input"
+                // Prefer a short question field if present; never dump full status essays
+                let detail = (w["human_question"] as? String)
+                    ?? (w["ask"] as? String)
+                    ?? "needs your input"
                 return HumanAsk(
                     id: "seat-\(id)",
                     session: session,
-                    question: "\(lab) needs you — \(detail)",
+                    question: questionOnly("\(lab): \(detail)"),
                     source: id,
                     jobId: nil
                 )
@@ -1044,12 +1127,115 @@ final class HumanConsoleController: NSObject, NSWindowDelegate, NSTextViewDelega
         return ok
     }
 
+    static func cardsPath(session: String) -> String {
+        humanDir(session: session) + "/chat.jsonl"
+    }
+
+    /// Append a structured card (interactive console). Also keeps free-text log for agents.
+    @discardableResult
+    static func appendCard(session: String, kind: HumanChatMessage.Kind, text: String,
+                           jobId: String? = nil, seatId: String? = nil, files: [String] = []) -> HumanChatMessage {
+        let msg = HumanChatMessage(
+            id: "m-\(Int(Date().timeIntervalSince1970 * 1000))-\(UUID().uuidString.prefix(6))",
+            kind: kind,
+            text: text.trimmingCharacters(in: .whitespacesAndNewlines),
+            ts: Date().timeIntervalSince1970,
+            jobId: jobId,
+            seatId: seatId,
+            files: files
+        )
+        let dir = humanDir(session: session)
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = cardsPath(session: session)
+        if let data = try? JSONSerialization.data(withJSONObject: msg.asDict()),
+           var line = String(data: data, encoding: .utf8) {
+            line += "\n"
+            if let h = FileHandle(forWritingAtPath: path) {
+                h.seekToEndOfFile()
+                h.write(Data(line.utf8))
+                try? h.close()
+            } else {
+                try? line.write(toFile: path, atomically: true, encoding: .utf8)
+            }
+        }
+        return msg
+    }
+
+    /// Load structured cards (newest last). Cap to last N for UI.
+    static func loadCards(session: String, limit: Int = 80) -> [HumanChatMessage] {
+        let path = cardsPath(session: session)
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8), !raw.isEmpty else {
+            // Migrate: seed from free-text log if present (one-time light parse)
+            return seedCardsFromLog(session: session)
+        }
+        var out: [HumanChatMessage] = []
+        for line in raw.split(separator: "\n") {
+            let s = String(line).trimmingCharacters(in: .whitespaces)
+            guard !s.isEmpty, let data = s.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let msg = HumanChatMessage.fromDict(obj) else { continue }
+            out.append(msg)
+        }
+        if out.count > limit { out = Array(out.suffix(limit)) }
+        return out
+    }
+
+    /// Best-effort parse of legacy console.log into a few from_you cards.
+    private static func seedCardsFromLog(session: String) -> [HumanChatMessage] {
+        let path = logPath(session: session)
+        guard let data = try? String(contentsOfFile: path, encoding: .utf8), !data.isEmpty else {
+            return []
+        }
+        var cards: [HumanChatMessage] = []
+        let chunks = data.components(separatedBy: "—— YOU ·")
+        for chunk in chunks.dropFirst().suffix(12) {
+            let body = chunk
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .dropFirst() // timestamp line remainder
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty else { continue }
+            let files = body.components(separatedBy: "\n")
+                .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("- /") }
+                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "- ").union(.whitespaces)) }
+            let text = questionOnly(body)
+            cards.append(HumanChatMessage(
+                id: "seed-\(cards.count)-\(session.hashValue)",
+                kind: .fromYou,
+                text: String(text.prefix(500)),
+                ts: Date().timeIntervalSince1970 - Double(12 - cards.count),
+                jobId: nil,
+                seatId: nil,
+                files: files
+            ))
+        }
+        // Persist seed so we don't re-parse every poll
+        if !cards.isEmpty {
+            for c in cards {
+                _ = appendCard(session: session, kind: c.kind, text: c.text, files: c.files)
+            }
+        }
+        return loadCards(session: session, limit: 80)
+    }
+
     /// Paste into conductor tmux pane + append human log (unified path).
     @discardableResult
     static func deliver(session: String, text: String) -> Bool {
         let header = "\n—— YOU · \(ISO8601DateFormatter().string(from: Date())) ——\n"
         let body = header + text + "\n"
-        // Log first (source of truth for console history)
+        // Structured card for interactive UI
+        var files: [String] = []
+        if text.contains("Attached files:") {
+            for line in text.components(separatedBy: .newlines) {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                if t.hasPrefix("- /") || t.hasPrefix("- ~/") {
+                    files.append(String(t.dropFirst(2)).trimmingCharacters(in: .whitespaces))
+                }
+            }
+        }
+        _ = appendCard(session: session, kind: .fromYou, text: text, files: files)
+
+        // Free-text log (agents / outbox)
         let path = logPath(session: session)
         let dir = (path as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -1066,7 +1252,7 @@ final class HumanConsoleController: NSObject, NSWindowDelegate, NSTextViewDelega
             atPath: (outbox as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         try? body.write(toFile: outbox, atomically: true, encoding: .utf8)
 
-        // Deliver into orchestrator pane (tmux :0)
+        // Deliver into orchestrator pane — prefer registered c1 pane_id (survives view sessions)
         TmuxScroll.apply(session: session)
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("pong-human-\(UUID().uuidString).txt")
@@ -1076,22 +1262,63 @@ final class HumanConsoleController: NSObject, NSWindowDelegate, NSTextViewDelega
             Pong.log("human console write tmp fail: \(error)")
             return false
         }
-        let target = "\(session):0"
+        let paneId = Self.conductorPaneId(session: session)
+        // Prefer immutable pane id; fall back to window 0 of base session
+        let target = paneId.isEmpty ? "\(session):0" : paneId
         let q = tmp.path.replacingOccurrences(of: "'", with: "'\\''")
+        // load-buffer from file → paste → Enter twice (Grok/Claude often need a real submit)
         let out = Pong.sh("""
             tmux has-session -t '\(session)' 2>/dev/null || exit 1
-            tmux load-buffer -b pong_human '\(q)' 2>/dev/null || tmux load-buffer '\(q)'
-            tmux paste-buffer -b pong_human -t '\(target)' 2>/dev/null || tmux paste-buffer -t '\(target)'
-            tmux delete-buffer -b pong_human 2>/dev/null || true
-            tmux send-keys -t '\(target)' Enter 2>/dev/null || true
+            tmux load-buffer -b pong_human '\(q)' || exit 2
+            tmux paste-buffer -b pong_human -d -t '\(target)' || exit 3
+            sleep 0.12
+            tmux send-keys -t '\(target)' Enter
+            sleep 0.08
+            tmux send-keys -t '\(target)' C-m
+            sleep 0.05
+            tmux send-keys -t '\(target)' Enter
             echo OK
             """)
         try? FileManager.default.removeItem(at: tmp)
-        Pong.log("human console deliver session=\(session) out=\(out.prefix(80))")
+        Pong.log("human console deliver session=\(session) target=\(target) out=\(out.prefix(120))")
         return out.contains("OK")
+    }
+
+    /// Registered conductor pane_id (`c1` / hermes) or empty.
+    private static func conductorPaneId(session: String) -> String {
+        let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
+        if let cond = entry["conductor"] as? [String: Any],
+           let pid = cond["pane_id"] as? String, !pid.isEmpty {
+            return pid
+        }
+        // panes.json via pong routing (file)
+        let path = Pong.stateDir + "/sessions/\(session)/panes.json"
+        if let data = FileManager.default.contents(atPath: path),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in ["c1", "hermes"] {
+                if let row = obj[key] as? [String: Any],
+                   let pid = row["pane_id"] as? String, !pid.isEmpty {
+                    return pid
+                }
+            }
+        }
+        // Live query window 0
+        let live = Pong.sh("tmux display-message -p -t '\(session):0' '#{pane_id}' 2>/dev/null")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return live.hasPrefix("%") ? live : ""
     }
 
     static func logPath(session: String) -> String {
         Pong.stateDir + "/human/\(session)/console.log"
+    }
+
+    /// Clear chat history for one team only (not other sessions).
+    static func clearHistory(session: String) {
+        let path = logPath(session: session)
+        try? "".write(toFile: path, atomically: true, encoding: .utf8)
+        let outbox = Pong.stateDir + "/human/\(session)/outbox.md"
+        try? "".write(toFile: outbox, atomically: true, encoding: .utf8)
+        try? "".write(toFile: cardsPath(session: session), atomically: true, encoding: .utf8)
+        Pong.log("human console cleared session=\(session)")
     }
 }

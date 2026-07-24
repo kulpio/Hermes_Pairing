@@ -9,8 +9,10 @@ from typing import Any
 from .base import TransportResult
 
 # cmd templates: {prompt} replaced; shell=False with list when possible
+# NOTE: Never auto-approve host commands (`--yolo` / equivalent). Headless means
+# non-interactive only — the user still owns risk via their CLI install defaults.
 HEADLESS = {
-    "grok": ["grok", "-p", "{prompt}", "--yolo"],
+    "grok": ["grok", "-p", "{prompt}"],
     "claude": ["claude", "-p", "{prompt}"],
     "hermes": ["hermes", "chat", "-q", "{prompt}", "-Q"],
     "codex": ["codex", "exec", "{prompt}"],

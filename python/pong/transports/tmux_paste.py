@@ -79,7 +79,12 @@ def _verify_registration(
     worker: dict[str, Any],
     live: dict[str, str],
 ) -> str | None:
-    """Return error string if live pane does not match registration."""
+    """Return error string if live pane does not match registration.
+
+    Claude/Grok TUIs overwrite pane titles (e.g. \"✳ Claude Code\"). The immutable
+    pane_id is the source of truth — never refuse a matching pane_id just because
+    the TUI rewrote the title (that forced silent headless fallback).
+    """
     from ..routing import exact_window_title, load_pane_registration
 
     wid = str(worker.get("id") or "")
@@ -97,6 +102,12 @@ def _verify_registration(
             f"(or view {session}-*)"
         )
 
+    # Strongest signal: registered / worker pane_id matches live pane
+    reg_pid = str(reg.get("pane_id") or worker.get("pane_id") or "").strip()
+    live_pid = str(live.get("pane_id") or "").strip()
+    if reg_pid and live_pid and reg_pid == live_pid:
+        return None
+
     # Title check: exact recovery token, or registered title, must appear
     title_ok = False
     if expected_title and (
@@ -111,20 +122,16 @@ def _verify_registration(
         # pane_start_command is often the shell; worker cmd may be substring of history
         if reg_start in live_start or live_start in reg_start:
             start_ok = True
-    if reg.get("pane_id") and live.get("pane_id") == str(reg.get("pane_id")):
-        # Immutable pane id match is the strongest signal
-        if title_ok or start_ok or not reg.get("title"):
-            return None
     if title_ok:
         return None
-    if reg and not title_ok and not start_ok:
+    if start_ok:
+        return None
+    if reg:
         return (
             f"pane verify failed for {wid}: title={live_title!r} "
-            f"expected≈{expected_title!r} start={live_start!r}"
+            f"expected≈{expected_title!r} start={live_start!r} pane={live_pid!r}"
         )
-    # No registration beyond pane_id — still require pane exists (already checked)
-    if not reg:
-        return None
+    # No registration beyond existence (already checked)
     return None
 
 
@@ -186,7 +193,8 @@ def send(job: dict[str, Any], worker: dict[str, Any], state: dict[str, Any]) -> 
         return TransportResult("tmux_paste", False, verify_err)
 
     target = pane_id  # pin to immutable pane id only
-    _run(["tmux", "display-message", "-t", target, "⚡ Pong: submitting job…"])
+    # Soft status (non-blocking); ignore failures
+    _run(["tmux", "display-message", "-t", target, "⚡ CyberPong: submitting job…"])
     time.sleep(0.05)
     ok, _ = _run(["tmux", "load-buffer", "-"], input_text=prompt)
     if not ok:
@@ -196,9 +204,10 @@ def send(job: dict[str, Any], worker: dict[str, Any], state: dict[str, Any]) -> 
             time.sleep(0.02)
     else:
         _run(["tmux", "paste-buffer", "-t", target, "-d"])
-    time.sleep(0.15)
+    # Submit: TUI agents need a real Enter (and sometimes a second for focus)
+    time.sleep(0.12)
     _run(["tmux", "send-keys", "-t", target, "Enter"])
-    time.sleep(0.05)
+    time.sleep(0.08)
     _run(["tmux", "send-keys", "-t", target, "C-m"])
     return TransportResult(
         "tmux_paste",

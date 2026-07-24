@@ -25,7 +25,8 @@ pong job create --worker w2 --task 'Write tests for X only. End with done marker
 ## Hard rules
 
 - While BRIDGE_ON: **no product file edits** yourself — only verify, plan, job, ledger.
-- Prefer `--no-paste` when paste is flaky; job file remains authoritative.
+- Prefer default **job+paste** so workers see the handoff in Terminal. Use `--no-paste` only when intentionally silent. Avoid `--headless` unless the human asked for offline run (it hides the seat TUI).
+- **Honor Architecture:** only assign seats you have a forward edge to. Subagents (e.g. Lil bob under Bob) get work via their parent seat’s job create — not a direct hop from you. If `pong job create` says `flow_hop_required`, follow the hop list.
 - Respect TEAM CONTEXT / project_root on every job.
 - `pong status` anytime for roster + bind card.
 

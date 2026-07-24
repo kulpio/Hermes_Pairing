@@ -490,6 +490,84 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_architecture(args: argparse.Namespace) -> int:
+    """Architecture helpers (recap for a seat)."""
+    from pong.flow import effective_edges
+    from pong.handoff_recap import architecture_recap_for_seat
+    from pong.state import detect_bound_session, load_session_state
+
+    if args.architecture_cmd != "recap":
+        print("error: unknown architecture subcommand", file=sys.stderr)
+        return 2
+    sess = detect_bound_session(args.session)
+    if not sess:
+        print("error: no session (pass -s / --session)", file=sys.stderr)
+        return 2
+    state = load_session_state(sess)
+    seat = (args.seat or "").strip()
+    if not seat:
+        print("error: --seat required (e.g. w1, c1)", file=sys.stderr)
+        return 2
+    if args.json:
+        edges = effective_edges(state)
+        print(
+            json.dumps(
+                {
+                    "session": sess,
+                    "seat": seat,
+                    "edges": edges,
+                    "recap": architecture_recap_for_seat(state, seat),
+                },
+                indent=2,
+            )
+        )
+        return 0
+    text = architecture_recap_for_seat(state, seat)
+    sys.stdout.write(text)
+    return 0
+
+
+def _cmd_seat(args: argparse.Namespace) -> int:
+    """Durable seat identity brief."""
+    from pong.role_identity import (
+        format_architecture_guardrails,
+        format_seat_identity,
+        seat_mission_role,
+    )
+    from pong.state import detect_bound_session, load_session_state
+
+    if args.seat_cmd != "brief":
+        print("error: unknown seat subcommand", file=sys.stderr)
+        return 2
+    sess = detect_bound_session(args.session)
+    if not sess:
+        print("error: no session (pass -s / --session)", file=sys.stderr)
+        return 2
+    state = load_session_state(sess)
+    seat = (args.seat or "").strip()
+    if not seat:
+        print("error: --seat required (e.g. w1, c1)", file=sys.stderr)
+        return 2
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "session": sess,
+                    "seat": seat,
+                    "mission_role": seat_mission_role(state, seat),
+                    "identity": format_seat_identity(state, seat),
+                    "architecture": format_architecture_guardrails(state, seat),
+                },
+                indent=2,
+            )
+        )
+        return 0
+    sys.stdout.write(format_seat_identity(state, seat))
+    sys.stdout.write("\n")
+    sys.stdout.write(format_architecture_guardrails(state, seat))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pong", description="Pong — agent mission control")
     p.add_argument("-s", "--session", default=None, help="bound team session")
@@ -516,6 +594,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     chk = sub.add_parser("check", help="foundation self-check (UI readiness)")
     chk.set_defaults(func=_cmd_check)
+
+    arch = sub.add_parser(
+        "architecture",
+        help="architecture helpers (handoff recap from flow_graph)",
+    )
+    archsub = arch.add_subparsers(dest="architecture_cmd", required=True)
+    ar = archsub.add_parser(
+        "recap",
+        help="print architecture handoff recap for a seat (claim/assign hops)",
+    )
+    ar.add_argument("--seat", "-w", required=True, help="seat id e.g. w1, c1")
+    ar.add_argument("--json", action="store_true", help="edges + recap as JSON")
+    ar.set_defaults(func=_cmd_architecture)
+
+    seat_p = sub.add_parser(
+        "seat",
+        help="seat identity helpers (durable mission role + architecture road)",
+    )
+    seatsub = seat_p.add_subparsers(dest="seat_cmd", required=True)
+    sb = seatsub.add_parser(
+        "brief",
+        help="print durable seat identity + architecture guardrails",
+    )
+    sb.add_argument("--seat", "-w", required=True, help="seat id e.g. w1, c1")
+    sb.add_argument("--json", action="store_true")
+    sb.set_defaults(func=_cmd_seat)
 
     j = sub.add_parser("job", help="job control plane")
     jsub = j.add_subparsers(dest="job_cmd", required=True)

@@ -19,6 +19,8 @@ final class TeamArchCanvas: NSView {
         var to: String
         var kind: String
         var label: String
+        /// Optional curve handle offset from straight midpoint (stays after drag).
+        var midOffset: CGPoint = .zero
     }
 
     var nodes: [Node] = []
@@ -46,13 +48,20 @@ final class TeamArchCanvas: NSView {
     private var endpointDrag: (edgeId: String, end: Endpoint)?
     private var endpointDragPoint: NSPoint?
     private var hoverEndpoint: (edgeId: String, end: Endpoint)?
+    /// Dragging the middle of a link to bend it (persisted midOffset).
+    private var midDragEdgeId: String?
+    private var midDragStart: NSPoint?
+    private var midDragBase: CGPoint = .zero
+    /// Session key for persisting seat positions on the Architecture canvas.
+    var persistSession: String?
 
+    /// Simple language so anyone can build a full architecture.
     static let kindChoices: [(id: String, title: String, short: String)] = [
-        ("delegate", "Delegate — assigns jobs", "DELEGATE"),
-        ("claim", "Claim — reports done", "CLAIM"),
-        ("review", "Review — asks review", "REVIEW"),
-        ("peer", "Peer handoff — agent → agent", "PEER"),
-        ("sub", "Sub-link — agent → sub", "SUB · LINK"),
+        ("delegate", "Gives work (boss → agent)", "GIVES WORK"),
+        ("claim", "Sends result back", "SENDS RESULT"),
+        ("review", "Asks for a check", "CHECK"),
+        ("peer", "Teammate handoff", "TEAMMATE"),
+        ("sub", "Helper under an agent", "HELPER"),
     ]
 
     override var isFlipped: Bool { true }
@@ -105,9 +114,9 @@ final class TeamArchCanvas: NSView {
         } else {
             for n in nodes where n.role != "conductor" {
                 if let p = n.parentId {
-                    edges.append(Edge(id: "\(p)>\(n.id)", from: p, to: n.id, kind: "sub", label: "SUB · LINK"))
+                    edges.append(Edge(id: "\(p)>\(n.id)", from: p, to: n.id, kind: "sub", label: "HELPER"))
                 } else {
-                    edges.append(Edge(id: "c1>\(n.id)", from: "c1", to: n.id, kind: "delegate", label: "DELEGATE"))
+                    edges.append(Edge(id: "c1>\(n.id)", from: "c1", to: n.id, kind: "delegate", label: "GIVES WORK"))
                 }
             }
         }
@@ -116,17 +125,21 @@ final class TeamArchCanvas: NSView {
     }
 
     /// Live Design flow: seats from the map + persisted flow_graph.
-    func load(seats: [Seat3D], flowEdges: [FlowGraph.Edge]) {
+    func load(seats: [Seat3D], flowEdges: [FlowGraph.Edge], session: String? = nil) {
         nodes = []
         edges = []
         allowAddSeats = false
+        if let session { persistSession = session }
+        let savedPos = loadArchPositions()
         var agentI = 0, subI = 0
         for s in seats where s.role != "human" && s.role != "add" {
             let role = s.role == "conductor" ? "conductor"
                 : (s.role == "subagent" ? "subagent" : "worker")
             let x: CGFloat
             let y: CGFloat
-            if role == "conductor" {
+            if let p = savedPos[s.id] {
+                x = p.x; y = p.y
+            } else if role == "conductor" {
                 x = max(40, bounds.midX - 60)
                 y = 36
             } else if role == "subagent" {
@@ -146,18 +159,71 @@ final class TeamArchCanvas: NSView {
                 modelId: "claude"
             ))
         }
-        edges = flowEdges.map {
-            Edge(id: $0.id, from: $0.from, to: $0.to, kind: $0.kind, label: $0.label)
+        let mids = loadEdgeMids()
+        edges = flowEdges.map { fe in
+            var e = Edge(id: fe.id, from: fe.from, to: fe.to, kind: fe.kind, label: fe.label)
+            if let m = mids[fe.id] { e.midOffset = m }
+            if let short = Self.kindChoices.first(where: { $0.id == fe.kind })?.short {
+                e.label = short
+            }
+            return e
         }
         needsDisplay = true
         onChanged?()
     }
 
     func exportEdges() -> [FlowGraph.Edge] {
-        edges.map {
+        // Persist midpoints + positions when exporting
+        saveArchPositions()
+        saveEdgeMids()
+        return edges.map {
             FlowGraph.Edge(id: $0.id, from: $0.from, to: $0.to,
                            dir: "forward", kind: $0.kind, label: $0.label)
         }
+    }
+
+    private func loadArchPositions() -> [String: CGPoint] {
+        guard let session = persistSession else { return [:] }
+        let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
+        let raw = entry["arch_positions"] as? [String: [String: Any]] ?? [:]
+        var out: [String: CGPoint] = [:]
+        for (k, v) in raw {
+            let x = CGFloat((v["x"] as? Double) ?? Double(v["x"] as? Int ?? 0))
+            let y = CGFloat((v["y"] as? Double) ?? Double(v["y"] as? Int ?? 0))
+            out[k] = CGPoint(x: x, y: y)
+        }
+        return out
+    }
+
+    private func saveArchPositions() {
+        guard let session = persistSession else { return }
+        var map: [String: [String: Any]] = [:]
+        for n in nodes {
+            map[n.id] = ["x": Double(n.origin.x), "y": Double(n.origin.y)]
+        }
+        PairState.mutate(session) { $0["arch_positions"] = map }
+    }
+
+    private func loadEdgeMids() -> [String: CGPoint] {
+        guard let session = persistSession else { return [:] }
+        let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
+        let raw = entry["arch_edge_mids"] as? [String: [String: Any]] ?? [:]
+        var out: [String: CGPoint] = [:]
+        for (k, v) in raw {
+            let x = CGFloat((v["x"] as? Double) ?? 0)
+            let y = CGFloat((v["y"] as? Double) ?? 0)
+            out[k] = CGPoint(x: x, y: y)
+        }
+        return out
+    }
+
+    private func saveEdgeMids() {
+        guard let session = persistSession else { return }
+        var map: [String: [String: Any]] = [:]
+        for e in edges where e.midOffset != .zero {
+            map[e.id] = ["x": Double(e.midOffset.x), "y": Double(e.midOffset.y)]
+        }
+        PairState.mutate(session) { $0["arch_edge_mids"] = map }
     }
 
     func exportWorkers() -> [(id: String, title: String, mission: String, parentId: String?, modelId: String)] {
@@ -206,9 +272,9 @@ final class TeamArchCanvas: NSView {
 
         let ink = NSColor.white
         let bands: [(String, CGFloat)] = [
-            ("ORCH", 12),
+            ("BOSS", 12),
             ("AGENTS", bandH + 12),
-            ("SUB", bandH * 2 + 12),
+            ("HELPERS", bandH * 2 + 12),
         ]
         for (idx, band) in bands.enumerated() {
             let (name, y) = band
@@ -245,18 +311,19 @@ final class TeamArchCanvas: NSView {
             }
         }
 
-        // Edges + dotted endpoints
+        // Edges + dotted endpoints (curves stick via midOffset)
         for e in edges {
             guard var ends = edgeEndpoints(e) else { continue }
-            // Live drag rubber-band
             if let drag = endpointDrag, drag.edgeId == e.id, let pt = endpointDragPoint {
                 if drag.end == .from { ends.from = pt } else { ends.to = pt }
             }
             let p0 = ends.from, p1 = ends.to
+            let midBase = NSPoint(x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2)
+            let mid = NSPoint(x: midBase.x + e.midOffset.x, y: midBase.y + e.midOffset.y)
             let path = NSBezierPath()
             path.move(to: p0)
-            path.line(to: p1)
-            let sel = e.id == selectedEdgeId
+            path.curve(to: p1, controlPoint1: mid, controlPoint2: mid)
+            let sel = e.id == selectedEdgeId || midDragEdgeId == e.id
             path.lineWidth = sel ? 2.5 : (e.kind == "peer" ? 1.25 : 1.5)
             let col: NSColor = {
                 switch e.kind {
@@ -269,8 +336,7 @@ final class TeamArchCanvas: NSView {
             col.setStroke()
             path.stroke()
 
-            // Arrow tip near destination
-            let dx = p1.x - p0.x, dy = p1.y - p0.y
+            let dx = p1.x - mid.x, dy = p1.y - mid.y
             let len = max(1, hypot(dx, dy))
             let ux = dx / len, uy = dy / len
             let tip = NSPoint(x: p1.x - ux * 10, y: p1.y - uy * 10)
@@ -280,7 +346,6 @@ final class TeamArchCanvas: NSView {
             arr.move(to: tip); arr.line(to: left); arr.line(to: right); arr.close()
             col.setFill(); arr.fill()
 
-            let mid = NSPoint(x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2)
             let short = Self.kindChoices.first(where: { $0.id == e.kind })?.short ?? e.label
             let lab = short as NSString
             let attrs: [NSAttributedString.Key: Any] = [
@@ -291,7 +356,8 @@ final class TeamArchCanvas: NSView {
             let sz = lab.size(withAttributes: attrs)
             lab.draw(at: NSPoint(x: mid.x - sz.width / 2, y: mid.y - sz.height / 2), withAttributes: attrs)
 
-            // Dotted endpoint handles (both ends) — drag to reassign
+            // Mid handle — drag to bend; position sticks
+            drawEndpointDot(at: mid, color: col.withAlphaComponent(0.9), hot: midDragEdgeId == e.id)
             drawEndpointDot(at: p0, color: col, hot: isHotEndpoint(e.id, .from))
             drawEndpointDot(at: p1, color: col, hot: isHotEndpoint(e.id, .to))
         }
@@ -501,7 +567,20 @@ final class TeamArchCanvas: NSView {
             }
         }
 
-        // Endpoint handles first — reassign links by dragging dots
+        // Bend handle (mid of link) — drag so the curve sticks
+        if let midHit = midHit(at: p) {
+            midDragEdgeId = midHit
+            midDragStart = p
+            if let e = edges.first(where: { $0.id == midHit }) {
+                midDragBase = e.midOffset
+            }
+            selectedEdgeId = midHit
+            selectedNodeId = nil
+            needsDisplay = true
+            return
+        }
+
+        // Endpoint handles — reassign links by dragging dots
         if let hit = endpointHit(at: p) {
             endpointDrag = hit
             endpointDragPoint = p
@@ -531,6 +610,7 @@ final class TeamArchCanvas: NSView {
                 return
             }
 
+            // Double-click: model (CLI) for non-boss when adding seats
             if event.clickCount == 2, allowAddSeats, n.role != "conductor" {
                 changeModel(for: n.id)
                 return
@@ -641,7 +721,7 @@ final class TeamArchCanvas: NSView {
             nodes[i].origin.y = bandH * 2 + 40
         }
         if edge.kind == "peer", !edges.contains(where: { $0.from == "c1" && $0.to == edge.to }) {
-            edges.append(Edge(id: "c1>\(edge.to):delegate", from: "c1", to: edge.to, kind: "delegate", label: "DELEGATE"))
+            edges.append(Edge(id: "c1>\(edge.to):delegate", from: "c1", to: edge.to, kind: "delegate", label: "GIVES WORK"))
         }
         linkFrom = nil
         linkMode = false
@@ -699,13 +779,13 @@ final class TeamArchCanvas: NSView {
         let a = NSAlert()
         a.messageText = "“\(n.title)”"
         a.informativeText =
-            "Link to an existing seat on this canvas, or create a new agent.\n\n" +
-            "• Link to existing — click the destination next (no new agent)\n" +
-            "• New peer — new agent on AGENTS, peer-linked from here\n" +
-            "• New sub — new agent on SUB under this seat"
-        a.addButton(withTitle: "Link to existing…")
-        a.addButton(withTitle: "New peer agent")
-        a.addButton(withTitle: "New sub-agent")
+            "Simple choices:\n\n" +
+            "• Connect to someone already here\n" +
+            "• New teammate (same row)\n" +
+            "• New helper under this agent"
+        a.addButton(withTitle: "Connect…")
+        a.addButton(withTitle: "New teammate")
+        a.addButton(withTitle: "New helper")
         a.addButton(withTitle: "Cancel")
         let r = a.runModal()
         switch r {
@@ -898,12 +978,12 @@ final class TeamArchCanvas: NSView {
             let short = Self.kindChoices.first(where: { $0.id == kindEdge })?.short ?? kindEdge.uppercased()
             edges.append(Edge(id: "\(from)>\(id):\(kindEdge)", from: from, to: id, kind: kindEdge, label: short))
             if kindEdge == "peer" {
-                edges.append(Edge(id: "c1>\(id):delegate", from: "c1", to: id, kind: "delegate", label: "DELEGATE"))
+                edges.append(Edge(id: "c1>\(id):delegate", from: "c1", to: id, kind: "delegate", label: "GIVES WORK"))
             }
         } else if isSub, let p = parentId {
-            edges.append(Edge(id: "\(p)>\(id):sub", from: p, to: id, kind: "sub", label: "SUB · LINK"))
+            edges.append(Edge(id: "\(p)>\(id):sub", from: p, to: id, kind: "sub", label: "HELPER"))
         } else {
-            edges.append(Edge(id: "c1>\(id):delegate", from: "c1", to: id, kind: "delegate", label: "DELEGATE"))
+            edges.append(Edge(id: "c1>\(id):delegate", from: "c1", to: id, kind: "delegate", label: "GIVES WORK"))
         }
         needsDisplay = true
         onChanged?()
@@ -912,11 +992,19 @@ final class TeamArchCanvas: NSView {
     override func mouseDragged(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
 
+        if let eid = midDragEdgeId, let start = midDragStart,
+           let ei = edges.firstIndex(where: { $0.id == eid }) {
+            let dx = p.x - start.x, dy = p.y - start.y
+            edges[ei].midOffset = CGPoint(x: midDragBase.x + dx, y: midDragBase.y + dy)
+            didDrag = true
+            needsDisplay = true
+            return
+        }
+
         // Reassign edge endpoint
         if let drag = endpointDrag {
             endpointDragPoint = p
             hoverEndpoint = drag
-            // Snap highlight to seat under cursor
             didDrag = true
             needsDisplay = true
             return
@@ -935,6 +1023,15 @@ final class TeamArchCanvas: NSView {
 
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+
+        if midDragEdgeId != nil {
+            midDragEdgeId = nil
+            midDragStart = nil
+            saveEdgeMids()
+            onChanged?()
+            needsDisplay = true
+            return
+        }
 
         // Finish endpoint reassignment
         if let drag = endpointDrag {
@@ -965,6 +1062,15 @@ final class TeamArchCanvas: NSView {
             return
         }
 
+        // Click (no drag) → edit name + purpose + link (one place for the wizard flow)
+        if let dragId, !didDrag {
+            editSeat(id: dragId)
+            self.dragId = nil
+            dragStart = nil
+            originStart = nil
+            return
+        }
+
         // Snap Y to band only. Preserve peer/custom edges — never force c1-only on move.
         if let dragId, let i = nodes.firstIndex(where: { $0.id == dragId }),
            nodes[i].role != "conductor" {
@@ -984,10 +1090,10 @@ final class TeamArchCanvas: NSView {
                         edges.removeAll { $0.to == dragId && ($0.kind == "delegate" || $0.kind == "sub") }
                         if !edges.contains(where: { $0.from == p && $0.to == dragId }) {
                             edges.append(Edge(id: "\(p)>\(dragId):sub", from: p, to: dragId,
-                                              kind: "sub", label: "SUB · LINK"))
+                                              kind: "sub", label: "HELPER"))
                         } else if let ei = edges.firstIndex(where: { $0.from == p && $0.to == dragId }) {
                             edges[ei].kind = "sub"
-                            edges[ei].label = "SUB · LINK"
+                            edges[ei].label = "HELPER"
                         }
                     }
                 }
@@ -999,16 +1105,94 @@ final class TeamArchCanvas: NSView {
                     edges.removeAll { $0.to == dragId && $0.kind == "sub" }
                     if !edges.contains(where: { $0.from == "c1" && $0.to == dragId }) {
                         edges.append(Edge(id: "c1>\(dragId):delegate", from: "c1", to: dragId,
-                                          kind: "delegate", label: "DELEGATE"))
+                                          kind: "delegate", label: "GIVES WORK"))
                     }
                 }
             }
             needsDisplay = true
+            saveArchPositions()
         }
         dragId = nil
         dragStart = nil
         originStart = nil
         onChanged?()
+    }
+
+    private func midHit(at p: NSPoint) -> String? {
+        for e in edges {
+            guard let ends = edgeEndpoints(e) else { continue }
+            let midBase = NSPoint(
+                x: (ends.from.x + ends.to.x) / 2,
+                y: (ends.from.y + ends.to.y) / 2
+            )
+            let mid = NSPoint(x: midBase.x + e.midOffset.x, y: midBase.y + e.midOffset.y)
+            if hypot(p.x - mid.x, p.y - mid.y) <= endpointR + 4 {
+                return e.id
+            }
+        }
+        return nil
+    }
+
+    /// Click a seat → name + purpose (what they do) + start a link. One place, no second wizard page required.
+    private func editSeat(id: String) {
+        guard let i = nodes.firstIndex(where: { $0.id == id }) else { return }
+        let n = nodes[i]
+        let a = NSAlert()
+        a.messageText = n.role == "conductor" ? "Boss (orchestrator)" : "Agent · \(n.id)"
+        a.informativeText = n.role == "conductor"
+            ? "Name the boss. They plan and give work — they don’t code while BRIDGE_ON."
+            : "Name them · pick what they do · then connect with Link if you want."
+
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: n.role == "conductor" ? 40 : 78))
+        let name = NSTextField(string: n.title)
+        name.placeholderString = "Display name"
+        name.frame = NSRect(x: 0, y: n.role == "conductor" ? 8 : 46, width: 300, height: 26)
+        box.addSubview(name)
+
+        var purposePop: NSPopUpButton?
+        if n.role != "conductor" {
+            let pop = NSPopUpButton(frame: NSRect(x: 0, y: 8, width: 300, height: 26), pullsDown: false)
+            for r in MissionRole.allCases where r != .orchestrator {
+                pop.addItem(withTitle: "\(r.title) — \(r.blurb)")
+                pop.lastItem?.representedObject = r.rawValue
+            }
+            if let mr = MissionRole.parse(n.mission),
+               let idx = MissionRole.allCases.filter({ $0 != .orchestrator }).firstIndex(of: mr) {
+                pop.selectItem(at: idx)
+            }
+            box.addSubview(pop)
+            purposePop = pop
+        }
+        a.accessoryView = box
+        a.addButton(withTitle: "Save")
+        if n.role != "conductor" {
+            a.addButton(withTitle: "Save + Link…")
+        }
+        a.addButton(withTitle: "Cancel")
+        let r = a.runModal()
+        let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        let idx = r.rawValue - first
+        // Cancel is last button
+        let cancelIdx = n.role == "conductor" ? 1 : 2
+        if idx < 0 || idx >= cancelIdx { return }
+
+        let t = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty { nodes[i].title = t }
+        if let pop = purposePop,
+           let raw = pop.selectedItem?.representedObject as? String,
+           let mr = MissionRole.parse(raw) {
+            nodes[i].mission = mr.rawValue
+        }
+        selectedNodeId = id
+        onChanged?()
+        needsDisplay = true
+
+        // Save + Link (second button on non-boss)
+        if n.role != "conductor", idx == 1 {
+            linkFrom = id
+            linkMode = true
+            needsDisplay = true
+        }
     }
 
     override func mouseMoved(with event: NSEvent) {

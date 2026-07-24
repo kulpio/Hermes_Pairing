@@ -10,6 +10,193 @@ private final class LeftHUDStackView: NSView {
     override var isFlipped: Bool { true }
 }
 
+// MARK: - Left HUD horizontal splitter (always wins hit-test over SceneKit)
+
+/// 16pt hit strip on the right edge of the left column. Uses mouseDown/drag
+/// (not a pan gesture) so SCNView never steals the widen drag. Draws a 2–3pt
+/// lime line; brightens on hover. Double-click resets default width.
+private final class LeftHUDSplitterView: NSView {
+    /// Called with horizontal delta in **window** coordinates (stable across hosts).
+    var onDragDelta: ((CGFloat) -> Void)?
+    var onDragBegan: (() -> Void)?
+    var onDragEnded: (() -> Void)?
+    var onDoubleClickReset: (() -> Void)?
+
+    private var dragStartX: CGFloat = 0
+    private var isDragging = false
+    private var isHovering = false
+    private let lineLayer = CALayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        // Visible 2.5pt center line
+        lineLayer.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.22).cgColor
+        lineLayer.cornerRadius = 1
+        layer?.addSublayer(lineLayer)
+        toolTip = "Drag right edge to widen human / cron panels · double-click resets"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        let lw: CGFloat = 2.5
+        let h = max(24, bounds.height - 16)
+        lineLayer.frame = CGRect(
+            x: (bounds.width - lw) * 0.5,
+            y: (bounds.height - h) * 0.5,
+            width: lw,
+            height: h
+        )
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect, .cursorUpdate],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // Always claim our bounds (and a 1pt pad) so SceneKit cannot win the strip
+        let expanded = bounds.insetBy(dx: -1, dy: 0)
+        return expanded.contains(point) ? self : nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        applyChrome()
+        NSCursor.resizeLeftRight.set()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        if !isDragging { applyChrome() }
+        NSCursor.arrow.set()
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.resizeLeftRight.set()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            onDoubleClickReset?()
+            return
+        }
+        isDragging = true
+        // Window coords — reliable after promote-to-canvasPage and pure 3D
+        dragStartX = event.locationInWindow.x
+        onDragBegan?()
+        applyChrome()
+        NSCursor.resizeLeftRight.set()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+        let x = event.locationInWindow.x
+        let dx = x - dragStartX
+        dragStartX = x
+        onDragDelta?(dx)
+        NSCursor.resizeLeftRight.set()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isDragging else { return }
+        isDragging = false
+        onDragEnded?()
+        applyChrome()
+        NSCursor.arrow.set()
+    }
+
+    private func applyChrome() {
+        if isDragging || isHovering {
+            layer?.backgroundColor = PongSheetChrome.lime.withAlphaComponent(0.18).cgColor
+            lineLayer.backgroundColor = PongSheetChrome.lime.withAlphaComponent(0.95).cgColor
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            lineLayer.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.28).cgColor
+        }
+    }
+
+    func resetChrome() {
+        isDragging = false
+        isHovering = false
+        applyChrome()
+    }
+}
+
+/// Human panel accepts arbitrary file drag-and-drop (paths staged for Send).
+private final class PongFileDropView: NSView {
+    var onPaths: (([String]) -> Void)?
+    var onHighlight: ((Bool) -> Void)?
+    private var baseBorder: CGColor?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard hasFileURLs(sender) else { return [] }
+        baseBorder = layer?.borderColor
+        onHighlight?(true)
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        hasFileURLs(sender) ? .copy : []
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onHighlight?(false)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        hasFileURLs(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        onHighlight?(false)
+        let paths = filePaths(from: sender)
+        guard !paths.isEmpty else { return false }
+        onPaths?(paths)
+        return true
+    }
+
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        onHighlight?(false)
+    }
+
+    private func hasFileURLs(_ sender: NSDraggingInfo) -> Bool {
+        sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [
+            .urlReadingFileURLsOnly: true,
+        ])
+    }
+
+    private func filePaths(from sender: NSDraggingInfo) -> [String] {
+        let pb = sender.draggingPasteboard
+        guard let urls = pb.readObjects(forClasses: [NSURL.self], options: [
+            .urlReadingFileURLsOnly: true,
+        ]) as? [URL] else { return [] }
+        // Cap at 40 paths — folders stay as one path each (no recursive expand)
+        return urls.prefix(40).map { $0.path }
+    }
+}
+
 // MARK: - Seat model for 3D map
 
 struct Seat3D {
@@ -28,18 +215,22 @@ struct Seat3D {
     let missionRole: String
     /// True = live only while active (spawned subagents); removed from map when done.
     let ephemeral: Bool
+    /// Neon catalog accent for primitive body + active plane glow (nil = role default).
+    let accent: NSColor?
     var globalId: String { "\(session)::\(id)" }
 
     init(
         session: String, id: String, role: String, title: String, subtitle: String,
         detail: String, status: String, parentId: String?, openJobs: Int,
-        flowHint: String, missionRole: String, ephemeral: Bool = false
+        flowHint: String, missionRole: String, ephemeral: Bool = false,
+        accent: NSColor? = nil
     ) {
         self.session = session; self.id = id; self.role = role
         self.title = title; self.subtitle = subtitle; self.detail = detail
         self.status = status; self.parentId = parentId; self.openJobs = openJobs
         self.flowHint = flowHint; self.missionRole = missionRole
         self.ephemeral = ephemeral
+        self.accent = accent
     }
 
     var resolvedMission: MissionRole {
@@ -153,11 +344,13 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
     private let legendPanel = NSView(frame: .zero)
 
     /// Docked YOU chat under TRACKING (same chrome). Collapse/expand only — never gone.
-    private let humanPanel = NSView(frame: .zero)
+    private let humanPanel = PongFileDropView(frame: .zero)
     private let humanTitle = NSTextField(labelWithString: "YOU · HUMAN")
     private let humanToggle = NSButton(frame: .zero)  // chevron ▾ / ▸ top-right
     private let humanOrchPop = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let humanInbox = NSTextField(wrappingLabelWithString: "")
+    /// Interactive card stream (replaces mono text dump).
+    private let humanChatStream = HumanChatStreamView(frame: .zero)
+    /// Legacy ask chrome kept hidden — ask cards live in the stream.
     private let humanAskLabel = NSTextField(wrappingLabelWithString: "")
     private let humanDenyBtn = NSButton(frame: .zero)
     private let humanAcceptOnceBtn = NSButton(frame: .zero)
@@ -165,10 +358,36 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
     private let humanAskRow = NSView(frame: .zero)
     private let humanInput = NSTextField(frame: .zero)
     private let humanSend = NSButton(frame: .zero)
+    private let humanClear = NSButton(frame: .zero)
+    private let humanGrow = NSButton(frame: .zero)
+    /// Staged file paths from drag-drop (included on Send).
+    private var humanPendingFiles: [String] = []
+    private let humanAttachLabel = NSTextField(labelWithString: "")
     private var humanSession: String = ""
+    /// Top-bar team focus: real session id, `"__all__"`, or nil.
+    private var focusedTeamSession: String?
+    private var lastSingleTeamFocus: String?
+    private let humanLockLabel = NSTextField(labelWithString: "")
+    private let humanAllBanner = NSTextField(labelWithString: "")
     private var humanExpanded = true
+    private var humanTall = false
+    /// Preferred expanded height (persisted); continuous drag resize.
+    /// First-run default ~380 when prefs has no `human_panel_height` (never clobber saved, even tiny).
+    private var humanPreferredHeight: CGFloat = {
+        let prefs = Pong.loadJSON(Pong.stateDir + "/ui-prefs.json")
+        if let v = prefs["human_panel_height"] as? Double {
+            return CGFloat(min(700, max(160, v)))
+        }
+        return 380
+    }()
     private var humanPanelHeight: NSLayoutConstraint?
     private var humanAskRowHeight: NSLayoutConstraint?
+    private var humanChatStreamHeight: NSLayoutConstraint?
+    private var humanInputHeight: NSLayoutConstraint?
+    private var humanPanelBaseBorder: CGColor?
+    private let humanVResizeGrip = NSView(frame: .zero)
+    private var humanVResizeStartY: CGFloat = 0
+    private var humanVResizeStartH: CGFloat = 0
 
     /// Task recap under YOU — “worker → what they’re doing” (replaces orch Focus button).
     private let taskPanel = NSView(frame: .zero)
@@ -212,6 +431,8 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
     var onKill: ((Seat3D) -> Void)?
     var onOptions: ((Seat3D) -> Void)?
     var onPerms: ((Seat3D) -> Void)?
+    /// Switch live seat CLI / model (workers).
+    var onChangeModel: ((Seat3D) -> Void)?
     /// Side pad: add peer agent on the AGENTS plane (no parent).
     var onPlus: ((Seat3D) -> Void)?
     /// Under-cube pad: add subagent under this agent (SUB plane).
@@ -233,7 +454,19 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
     private let leftHUDScroll = NSScrollView(frame: .zero)
     /// Flipped so top-to-bottom Auto Layout matches scroll origin (y grows downward).
     private let leftHUDStack = LeftHUDStackView(frame: .zero)
-    private let leftHUDColW: CGFloat = 220
+    /// Horizontal width of tracking/YOU column — user-resizable.
+    private var leftHUDColW: CGFloat = {
+        let v = (Pong.loadJSON(Pong.stateDir + "/ui-prefs.json")["left_hud_width"] as? Double) ?? 240
+        return CGFloat(min(420, max(180, v)))
+    }()
+    private var leftHUDScrollW: NSLayoutConstraint?
+    private var leftHUDStackW: NSLayoutConstraint?
+    private var leftHUDPanelWidthConstraints: [NSLayoutConstraint] = []
+    private let leftHUDSplitter = LeftHUDSplitterView(frame: .zero)
+    /// Width constraint for the hit strip (14–16pt).
+    private var leftHUDSplitterW: NSLayoutConstraint?
+    private static let leftHUDSplitterHitW: CGFloat = 16
+    private static let leftHUDDefaultColW: CGFloat = 240
 
     /// Cron timeline panel (left stack, collapsible list) + 3D ruler
     private let cronPanel = NSView(frame: .zero)
@@ -277,7 +510,7 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
             self?.applyMapTheme()
         }
         // HUD above SceneKit (AppKit: re-add above siblings)
-        for v in [leftHUDScroll, legendPanel, hintLabel, editBar, hoverHUD] as [NSView] {
+        for v in [leftHUDScroll, leftHUDSplitter, legendPanel, hintLabel, editBar, hoverHUD] as [NSView] {
             addSubview(v, positioned: .above, relativeTo: nil)
         }
     }
@@ -316,10 +549,11 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
             : NSColor(calibratedWhite: 0, alpha: 0.12)
     }
     private var mapHUDText: NSColor {
-        mapIsDark ? NSColor(calibratedWhite: 0.85, alpha: 1) : NSColor(calibratedWhite: 0.15, alpha: 1)
+        mapIsDark ? NSColor(calibratedWhite: 0.85, alpha: 1) : NSColor(calibratedWhite: 0.10, alpha: 1)
     }
     private var mapHUDMuted: NSColor {
-        mapIsDark ? NSColor(calibratedWhite: 0.55, alpha: 1) : NSColor(calibratedWhite: 0.45, alpha: 1)
+        // Light: deeper muted greys so captions don't vanish on white panels
+        mapIsDark ? NSColor(calibratedWhite: 0.55, alpha: 1) : NSColor(calibratedWhite: 0.32, alpha: 1)
     }
 
     /// Re-tint scene + HUD when appearance flips; rebuild décor & seat faces.
@@ -377,7 +611,6 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         trackBody.textColor = body
         humanTitle.textColor = PongTheme.amber
         humanToggle.contentTintColor = muted
-        humanInbox.textColor = body
         taskTitle.textColor = muted
         taskBody.textColor = body
         cronTitle.textColor = muted
@@ -1158,20 +1391,34 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         hoverHUD.addSubview(hoverBody)
     }
 
+    /// Height of the map chrome strip under the panel toolbar (hint line only).
+    /// Panel lays out toolbar just above this; keep tight so map gains space.
+    static let hintStripHeight: CGFloat = 14
+
     private func setupHint() {
         hintLabel.font = PongTheme.labelFont(10)
         hintLabel.textColor = NSColor(calibratedWhite: 0.5, alpha: 1)
         hintLabel.isBordered = false
         hintLabel.drawsBackground = false
         hintLabel.alignment = .center
-        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        hintLabel.lineBreakMode = .byTruncatingTail
+        // Frame-laid in layout() — sits under the floating toolbar (no -124 dead zone)
+        hintLabel.translatesAutoresizingMaskIntoConstraints = true
         addSubview(hintLabel)
-        NSLayoutConstraint.activate([
-            hintLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            // Above edit bar so it isn’t covered
-            hintLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -124),
-        ])
         refreshOrbitHint()
+    }
+
+    private func layoutHintStrip() {
+        let h = Self.hintStripHeight
+        let inset: CGFloat = 10
+        hintLabel.frame = NSRect(
+            x: inset,
+            y: 2,
+            width: max(40, bounds.width - inset * 2),
+            height: h
+        )
+        // Keep on top of SceneKit
+        addSubview(hintLabel)
     }
 
     /// Left column scroller so TRACKING / YOU / CRON / TASKS remain reachable in a short window.
@@ -1195,16 +1442,194 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         leftHUDScroll.documentView = leftHUDStack
         addSubview(leftHUDScroll)
 
+        leftHUDScrollW = leftHUDScroll.widthAnchor.constraint(equalToConstant: leftHUDColW + 20)
+        leftHUDStackW = leftHUDStack.widthAnchor.constraint(equalToConstant: leftHUDColW)
         NSLayoutConstraint.activate([
             leftHUDScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             leftHUDScroll.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             // Clear edit bar + hint along the bottom
             leftHUDScroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -130),
-            leftHUDScroll.widthAnchor.constraint(equalToConstant: leftHUDColW + 20),
+            leftHUDScrollW!,
             leftHUDStack.leadingAnchor.constraint(equalTo: leftHUDScroll.contentView.leadingAnchor, constant: 6),
             leftHUDStack.topAnchor.constraint(equalTo: leftHUDScroll.contentView.topAnchor, constant: 4),
-            leftHUDStack.widthAnchor.constraint(equalToConstant: leftHUDColW),
+            leftHUDStackW!,
         ])
+
+        // Horizontal splitter on outer edge of left HUD (16pt hit · mouse-driven drag)
+        leftHUDSplitter.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(leftHUDSplitter)
+        leftHUDSplitterW = leftHUDSplitter.widthAnchor.constraint(equalToConstant: Self.leftHUDSplitterHitW)
+        // Overlap ~6pt into the scroll so the grip sits on the column’s right edge
+        NSLayoutConstraint.activate([
+            leftHUDSplitter.leadingAnchor.constraint(equalTo: leftHUDScroll.trailingAnchor, constant: -6),
+            leftHUDSplitter.topAnchor.constraint(equalTo: leftHUDScroll.topAnchor),
+            leftHUDSplitter.bottomAnchor.constraint(equalTo: leftHUDScroll.bottomAnchor),
+            leftHUDSplitterW!,
+        ])
+        wireLeftHUDSplitter()
+        raiseLeftHUDChrome()
+    }
+
+    private func wireLeftHUDSplitter() {
+        leftHUDSplitter.onDragBegan = { [weak self] in
+            guard let self else { return }
+            // Ensure strip is above SceneKit / map chrome for the whole drag
+            self.raiseLeftHUDChrome()
+        }
+        leftHUDSplitter.onDragDelta = { [weak self] dx in
+            guard let self else { return }
+            self.setLeftHUDWidth(self.leftHUDColW + dx)
+        }
+        leftHUDSplitter.onDragEnded = { [weak self] in
+            self?.persistHUDPrefs()
+        }
+        leftHUDSplitter.onDoubleClickReset = { [weak self] in
+            guard let self else { return }
+            self.setLeftHUDWidth(Self.leftHUDDefaultColW)
+            self.persistHUDPrefs()
+        }
+    }
+
+    /// Keep left column + splitter above scnView / siblings after every layout or promote.
+    private func raiseLeftHUDChrome() {
+        guard let host = leftHUDScroll.superview else { return }
+        host.addSubview(leftHUDScroll, positioned: .above, relativeTo: nil)
+        host.addSubview(leftHUDSplitter, positioned: .above, relativeTo: leftHUDScroll)
+        if legendPanel.superview === host {
+            host.addSubview(legendPanel, positioned: .above, relativeTo: nil)
+        }
+    }
+
+    /// Hit-test helper for canvasPage: return splitter when point is on the strip (host coords).
+    func hitTestLeftHUDSplitter(in host: NSView, point: NSPoint) -> NSView? {
+        guard leftHUDSplitter.superview === host, !leftHUDSplitter.isHidden else { return nil }
+        let local = leftHUDSplitter.convert(point, from: host)
+        // Slightly expand hit for easier grab
+        if leftHUDSplitter.bounds.insetBy(dx: -2, dy: 0).contains(local) {
+            return leftHUDSplitter
+        }
+        return nil
+    }
+
+    /// Prefer splitter over SceneKit when still parented here (pure 3D / pre-promote).
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if leftHUDSplitter.superview === self, !leftHUDSplitter.isHidden {
+            let p = leftHUDSplitter.convert(point, from: self)
+            if leftHUDSplitter.bounds.insetBy(dx: -2, dy: 0).contains(p) {
+                return leftHUDSplitter
+            }
+        }
+        if leftHUDScroll.superview === self, !leftHUDScroll.isHidden {
+            let p = leftHUDScroll.convert(point, from: self)
+            if leftHUDScroll.bounds.contains(p), let hit = leftHUDScroll.hitTest(p) {
+                return hit
+            }
+        }
+        return super.hitTest(point)
+    }
+
+    private func setLeftHUDWidth(_ w: CGFloat) {
+        let hostW = (leftHUDScroll.superview ?? self).bounds.width
+        let maxW = min(520, max(200, hostW * 0.50))
+        leftHUDColW = min(maxW, max(180, w))
+        leftHUDScrollW?.constant = leftHUDColW + 20
+        leftHUDStackW?.constant = leftHUDColW
+        for c in leftHUDPanelWidthConstraints { c.constant = leftHUDColW }
+        // Keep promoted fixed-width constraints in sync if present
+        if hudPromoted, let host = leftHUDScroll.superview {
+            for c in host.constraints where c.firstItem as? NSView === leftHUDScroll && c.firstAttribute == .width {
+                c.constant = leftHUDColW + 20
+            }
+        }
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        leftHUDScroll.superview?.layoutSubtreeIfNeeded()
+        raiseLeftHUDChrome()
+    }
+
+    private func persistHUDPrefs() {
+        var prefs = Pong.loadJSON(Pong.stateDir + "/ui-prefs.json")
+        prefs["left_hud_width"] = Double(leftHUDColW)
+        prefs["human_panel_height"] = Double(humanPreferredHeight)
+        prefs["updated"] = Date().timeIntervalSince1970
+        Pong.writeJSON(Pong.stateDir + "/ui-prefs.json", prefs)
+    }
+
+    /// Re-tint human chrome after appearance flip.
+    func applyChromeTheme() {
+        PongTheme.stylePopUp(humanOrchPop)
+        humanPanel.layer?.backgroundColor = mapPanelFill.cgColor
+        humanPanelBaseBorder = mapPanelBorder.cgColor
+        humanPanel.layer?.borderColor = humanPanelBaseBorder
+    }
+
+    /// PanelController top-bar team selection → lock human console target.
+    func setFocusedTeamSession(_ session: String?) {
+        focusedTeamSession = session
+        if let s = session, s != "__all__", !s.isEmpty {
+            lastSingleTeamFocus = s
+            humanSession = s
+        } else if session == "__all__" {
+            // Prefer last single-team focus in the picker
+            if let last = lastSingleTeamFocus, PairState.listPairs().contains(last) {
+                humanSession = last
+            }
+        }
+        applyHumanFocusLock()
+        reloadHumanOrchPicker()
+        if !humanSession.isEmpty {
+            selectHumanOrch(session: humanSession)
+        }
+        reloadHumanInbox()
+    }
+
+    private func applyHumanFocusLock() {
+        let single: String? = {
+            guard let s = focusedTeamSession, s != "__all__", !s.isEmpty else { return nil }
+            return s
+        }()
+        let allMode = focusedTeamSession == "__all__" || focusedTeamSession == nil
+        if let s = single {
+            humanSession = s
+            humanOrchPop.isEnabled = false
+            humanOrchPop.isHidden = true
+            humanLockLabel.isHidden = !humanExpanded
+            humanAllBanner.isHidden = true
+            let name = teamDisplayName(for: s)
+            humanLockLabel.stringValue = "→ \(name)  (locked to focused team)"
+            humanTitle.stringValue = "YOU · \(name)"
+        } else {
+            humanOrchPop.isEnabled = true
+            humanOrchPop.isHidden = !humanExpanded
+            humanLockLabel.isHidden = true
+            if allMode && humanExpanded {
+                let name = teamDisplayName(for: humanSession)
+                humanAllBanner.isHidden = false
+                humanAllBanner.stringValue = "⚠ All teams · Sending to: \(name.isEmpty ? "—" : name)"
+            } else {
+                humanAllBanner.isHidden = true
+            }
+            let name = teamDisplayName(for: humanSession)
+            humanTitle.stringValue = name.isEmpty ? "YOU · HUMAN" : "YOU · \(name)"
+        }
+    }
+
+    /// Resolve session for send/ask; hard-refuses cross-team when single-focused.
+    private func resolvedSendSession() -> String? {
+        if let focus = focusedTeamSession, focus != "__all__", !focus.isEmpty {
+            if !humanSession.isEmpty, humanSession != focus {
+                Pong.log("human send refused: session=\(humanSession) focus=\(focus)")
+                humanAllBanner.isHidden = false
+                humanAllBanner.stringValue = "Blocked: focused team is \(teamDisplayName(for: focus))"
+                return nil
+            }
+            return focus
+        }
+        if let s = humanOrchPop.selectedItem?.representedObject as? String, !s.isEmpty {
+            humanSession = s
+            return s
+        }
+        return humanSession.isEmpty ? nil : humanSession
     }
 
     /// Pin stack bottom after all left panels exist so document height grows with content.
@@ -1214,53 +1639,89 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         ])
     }
 
-    /// Left “TRACKING” list — Anduril/Palantir ops density
-    private func setupTrackingPanel() {
-        trackPanel.wantsLayer = true
-        trackPanel.layer?.backgroundColor = NSColor(calibratedWhite: 0.04, alpha: 0.88).cgColor
-        trackPanel.layer?.cornerRadius = 6
-        trackPanel.layer?.borderWidth = 1
-        trackPanel.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.12).cgColor
-        trackPanel.translatesAutoresizingMaskIntoConstraints = false
-        leftHUDStack.addSubview(trackPanel)
+    /// Phase 0 parity: re-parent left HUD + right ops rail onto `canvasPage`
+    /// so 2D and 3D share one HUD. Call once after both maps are in the tree.
+    private var hudPromoted = false
+    func promoteSharedHUD(to host: NSView) {
+        guard !hudPromoted else {
+            layoutPromotedHUD(in: host.bounds)
+            return
+        }
+        hudPromoted = true
+        leftHUDScroll.removeFromSuperview()
+        leftHUDSplitter.removeFromSuperview()
+        legendPanel.removeFromSuperview()
+        host.addSubview(leftHUDScroll)
+        host.addSubview(leftHUDSplitter)
+        host.addSubview(legendPanel)
+        leftHUDScroll.translatesAutoresizingMaskIntoConstraints = false
+        leftHUDSplitter.translatesAutoresizingMaskIntoConstraints = false
+        // Re-pin to host; keep width constraint object so setLeftHUDWidth still works
+        leftHUDScrollW?.isActive = false
+        leftHUDScrollW = leftHUDScroll.widthAnchor.constraint(equalToConstant: leftHUDColW + 20)
+        leftHUDSplitterW?.isActive = false
+        leftHUDSplitterW = leftHUDSplitter.widthAnchor.constraint(equalToConstant: Self.leftHUDSplitterHitW)
+        NSLayoutConstraint.activate([
+            leftHUDScroll.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 8),
+            leftHUDScroll.topAnchor.constraint(equalTo: host.topAnchor, constant: 8),
+            leftHUDScroll.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -100),
+            leftHUDScrollW!,
+            leftHUDSplitter.leadingAnchor.constraint(equalTo: leftHUDScroll.trailingAnchor, constant: -6),
+            leftHUDSplitter.topAnchor.constraint(equalTo: leftHUDScroll.topAnchor),
+            leftHUDSplitter.bottomAnchor.constraint(equalTo: leftHUDScroll.bottomAnchor),
+            leftHUDSplitterW!,
+        ])
+        raiseLeftHUDChrome()
+        layoutPromotedHUD(in: host.bounds)
+        Pong.log("Agent3DMapView: shared HUD promoted to canvasPage")
+    }
 
+    func layoutPromotedHUD(in hostBounds: NSRect) {
+        guard hudPromoted else { return }
+        layoutRightHUD(in: hostBounds)
+        raiseLeftHUDChrome()
+    }
+
+    /// TRACKING views only — panel is merged into the right ops rail (legendPanel).
+    private func setupTrackingPanel() {
         trackTitle.font = PongTheme.labelFont(10)
         trackTitle.textColor = NSColor(calibratedWhite: 0.7, alpha: 1)
         trackTitle.isBordered = false
         trackTitle.drawsBackground = false
-        trackTitle.translatesAutoresizingMaskIntoConstraints = false
-        trackPanel.addSubview(trackTitle)
-
-        trackBody.font = PongTheme.mono(10)
+        trackTitle.stringValue = "TRACKING"
+        trackBody.font = PongTheme.mono(9)
         trackBody.textColor = NSColor(calibratedWhite: 0.85, alpha: 1)
         trackBody.isBordered = false
         trackBody.drawsBackground = false
-        trackBody.maximumNumberOfLines = 16
-        trackBody.translatesAutoresizingMaskIntoConstraints = false
-        trackPanel.addSubview(trackBody)
-
-        NSLayoutConstraint.activate([
-            trackPanel.leadingAnchor.constraint(equalTo: leftHUDStack.leadingAnchor),
-            trackPanel.topAnchor.constraint(equalTo: leftHUDStack.topAnchor, constant: 4),
-            trackPanel.widthAnchor.constraint(equalToConstant: leftHUDColW),
-            trackPanel.heightAnchor.constraint(equalToConstant: 140),
-            trackTitle.leadingAnchor.constraint(equalTo: trackPanel.leadingAnchor, constant: 12),
-            trackTitle.topAnchor.constraint(equalTo: trackPanel.topAnchor, constant: 10),
-            trackBody.leadingAnchor.constraint(equalTo: trackPanel.leadingAnchor, constant: 12),
-            trackBody.trailingAnchor.constraint(equalTo: trackPanel.trailingAnchor, constant: -12),
-            trackBody.topAnchor.constraint(equalTo: trackTitle.bottomAnchor, constant: 8),
-            trackBody.bottomAnchor.constraint(equalTo: trackPanel.bottomAnchor, constant: -12),
-        ])
+        trackBody.maximumNumberOfLines = 20
+        trackBody.lineBreakMode = .byWordWrapping
+        // Not on left stack — lives inside right ops rail
     }
 
-    /// YOU chat docked under TRACKING — always present; chevron collapses body only.
+    /// YOU chat on left stack (TRACKING moved to right).
     private func setupHumanPanel() {
         humanPanel.wantsLayer = true
         humanPanel.layer?.backgroundColor = NSColor(calibratedWhite: 0.04, alpha: 0.88).cgColor
         humanPanel.layer?.cornerRadius = 6
         humanPanel.layer?.borderWidth = 1
         humanPanel.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.12).cgColor
+        humanPanelBaseBorder = humanPanel.layer?.borderColor
         humanPanel.translatesAutoresizingMaskIntoConstraints = false
+        humanPanel.toolTip = "Drop any files here to attach paths for the orchestrator"
+        humanPanel.onHighlight = { [weak self] on in
+            guard let self else { return }
+            if on {
+                self.humanPanel.layer?.borderColor = PongTheme.amber.cgColor
+                self.humanPanel.layer?.borderWidth = 2
+            } else {
+                self.humanPanel.layer?.borderColor = self.humanPanelBaseBorder
+                    ?? NSColor(calibratedWhite: 1, alpha: 0.12).cgColor
+                self.humanPanel.layer?.borderWidth = 1
+            }
+        }
+        humanPanel.onPaths = { [weak self] paths in
+            self?.stageHumanFiles(paths)
+        }
         leftHUDStack.addSubview(humanPanel)
 
         humanTitle.font = PongTheme.labelFont(10)
@@ -1285,67 +1746,86 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         humanOrchPop.font = PongTheme.labelFont(10)
         humanOrchPop.target = self
         humanOrchPop.action = #selector(humanOrchChanged)
-        humanOrchPop.toolTip = "Which orchestrator receives your prompt"
+        humanOrchPop.toolTip = "Which orchestrator receives your prompt (All teams mode only)"
         humanOrchPop.translatesAutoresizingMaskIntoConstraints = false
+        PongTheme.stylePopUp(humanOrchPop)
         humanPanel.addSubview(humanOrchPop)
 
-        humanInbox.font = PongTheme.mono(9)
-        humanInbox.textColor = NSColor(calibratedWhite: 0.8, alpha: 1)
-        humanInbox.isBordered = false
-        humanInbox.drawsBackground = false
-        humanInbox.maximumNumberOfLines = 8
-        humanInbox.translatesAutoresizingMaskIntoConstraints = false
-        humanPanel.addSubview(humanInbox)
+        humanLockLabel.font = PongTheme.labelFont(9)
+        humanLockLabel.textColor = PongSheetChrome.lime
+        humanLockLabel.isBordered = false
+        humanLockLabel.drawsBackground = false
+        humanLockLabel.isHidden = true
+        humanLockLabel.translatesAutoresizingMaskIntoConstraints = false
+        humanPanel.addSubview(humanLockLabel)
 
-        // Ask decision row — Deny / Accept once / Always accept
-        humanAskRow.wantsLayer = true
-        humanAskRow.layer?.backgroundColor = NSColor(calibratedRed: 0.16, green: 0.11, blue: 0.04, alpha: 0.95).cgColor
-        humanAskRow.layer?.cornerRadius = 5
-        humanAskRow.layer?.borderWidth = 1
-        humanAskRow.layer?.borderColor = PongTheme.amber.withAlphaComponent(0.35).cgColor
-        humanAskRow.translatesAutoresizingMaskIntoConstraints = false
-        humanAskRow.isHidden = true
-        humanPanel.addSubview(humanAskRow)
+        humanAllBanner.font = PongTheme.labelFont(9)
+        humanAllBanner.textColor = PongTheme.amber
+        humanAllBanner.isBordered = false
+        humanAllBanner.drawsBackground = false
+        humanAllBanner.isHidden = true
+        humanAllBanner.translatesAutoresizingMaskIntoConstraints = false
+        humanPanel.addSubview(humanAllBanner)
 
-        humanAskLabel.font = PongTheme.mono(9)
-        humanAskLabel.textColor = PongTheme.amber
-        humanAskLabel.isBordered = false
-        humanAskLabel.drawsBackground = false
-        humanAskLabel.maximumNumberOfLines = 3
-        humanAskLabel.translatesAutoresizingMaskIntoConstraints = false
-        humanAskRow.addSubview(humanAskLabel)
-
-        func styleAskBtn(_ b: NSButton, title: String, action: Selector) {
-            b.title = title
-            b.bezelStyle = .inline
-            b.isBordered = false
-            b.wantsLayer = true
-            b.layer?.cornerRadius = 3
-            b.layer?.backgroundColor = NSColor(calibratedWhite: 0.18, alpha: 1).cgColor
-            b.font = PongTheme.labelFont(9)
-            b.contentTintColor = .white
-            b.target = self
-            b.action = action
-            b.translatesAutoresizingMaskIntoConstraints = false
-            humanAskRow.addSubview(b)
+        // Interactive card stream (primary chat UI)
+        humanChatStream.translatesAutoresizingMaskIntoConstraints = false
+        humanChatStream.onDecision = { [weak self] d in self?.humanRespondAsk(d) }
+        humanChatStream.onReplyFocus = { [weak self] in
+            self?.window?.makeFirstResponder(self?.humanInput)
         }
-        styleAskBtn(humanDenyBtn, title: "Deny", action: #selector(humanDenyAsk))
-        styleAskBtn(humanAcceptOnceBtn, title: "Accept once", action: #selector(humanAcceptOnceAsk))
-        styleAskBtn(humanAlwaysBtn, title: "Always accept", action: #selector(humanAlwaysAsk))
-        humanAlwaysBtn.toolTip = "Allow elevated actions for the rest of this session without re-asking"
-        humanDenyBtn.layer?.backgroundColor = NSColor(calibratedRed: 0.35, green: 0.12, blue: 0.12, alpha: 1).cgColor
-        humanAcceptOnceBtn.layer?.backgroundColor = NSColor(calibratedRed: 0.15, green: 0.28, blue: 0.18, alpha: 1).cgColor
-        humanAlwaysBtn.layer?.backgroundColor = NSColor(calibratedRed: 0.12, green: 0.22, blue: 0.32, alpha: 1).cgColor
+        humanChatStream.onJobTap = { [weak self] jid in self?.humanTapJob(jid) }
+        humanChatStream.onSeatTap = { [weak self] sid in self?.humanTapSeat(sid) }
+        humanChatStream.onFileTap = { path in
+            let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+        humanPanel.addSubview(humanChatStream)
+
+        // Legacy ask row kept off-screen/hidden — decisions live on stream cards
+        humanAskRow.isHidden = true
+        humanAskRow.translatesAutoresizingMaskIntoConstraints = false
+        humanPanel.addSubview(humanAskRow)
+        humanAskLabel.isHidden = true
+        humanDenyBtn.isHidden = true
+        humanAcceptOnceBtn.isHidden = true
+        humanAlwaysBtn.isHidden = true
+
+        humanAttachLabel.font = PongTheme.labelFont(9)
+        humanAttachLabel.textColor = PongTheme.amber
+        humanAttachLabel.isBordered = false
+        humanAttachLabel.drawsBackground = false
+        humanAttachLabel.isHidden = true
+        humanAttachLabel.lineBreakMode = .byTruncatingMiddle
+        humanAttachLabel.translatesAutoresizingMaskIntoConstraints = false
+        humanAttachLabel.toolTip = "Click to clear staged files"
+        humanPanel.addSubview(humanAttachLabel)
 
         humanInput.font = PongTheme.font(11)
-        humanInput.placeholderString = "Message selected orchestrator…"
+        humanInput.placeholderString = "Reply to orchestrator…"
         humanInput.isBordered = true
         humanInput.bezelStyle = .roundedBezel
         humanInput.focusRingType = .none
         humanInput.translatesAutoresizingMaskIntoConstraints = false
         humanInput.target = self
         humanInput.action = #selector(sendHumanChat)
+        if let cell = humanInput.cell as? NSTextFieldCell {
+            cell.wraps = true
+            cell.isScrollable = false
+            cell.usesSingleLineMode = false
+        }
+        humanInput.maximumNumberOfLines = 6
+        humanInput.lineBreakMode = .byWordWrapping
         humanPanel.addSubview(humanInput)
+
+        // Vertical resize grip on **bottom** edge of human panel
+        humanVResizeGrip.wantsLayer = true
+        humanVResizeGrip.layer?.backgroundColor = PongTheme.lineSoft.withAlphaComponent(0.55).cgColor
+        humanVResizeGrip.layer?.cornerRadius = 1
+        humanVResizeGrip.translatesAutoresizingMaskIntoConstraints = false
+        humanVResizeGrip.toolTip = "Drag bottom edge to resize height"
+        humanPanel.addSubview(humanVResizeGrip)
+        let vPan = NSPanGestureRecognizer(target: self, action: #selector(humanVResizePan(_:)))
+        humanVResizeGrip.addGestureRecognizer(vPan)
 
         humanSend.title = "Send"
         humanSend.bezelStyle = .inline
@@ -1360,56 +1840,191 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         humanSend.translatesAutoresizingMaskIntoConstraints = false
         humanPanel.addSubview(humanSend)
 
-        humanPanelHeight = humanPanel.heightAnchor.constraint(equalToConstant: 228)
+        humanClear.title = "Clear"
+        humanClear.bezelStyle = .inline
+        humanClear.isBordered = false
+        humanClear.font = PongTheme.labelFont(9)
+        humanClear.contentTintColor = PongTheme.textTertiary
+        humanClear.toolTip = "Clear chat history for this team only"
+        humanClear.target = self
+        humanClear.action = #selector(clearHumanHistory)
+        humanClear.translatesAutoresizingMaskIntoConstraints = false
+        humanPanel.addSubview(humanClear)
+
+        humanGrow.title = "↕"
+        humanGrow.bezelStyle = .inline
+        humanGrow.isBordered = false
+        humanGrow.font = PongTheme.font(11, weight: .medium)
+        humanGrow.contentTintColor = PongTheme.textSecondary
+        humanGrow.toolTip = "Snap taller / shorter"
+        humanGrow.target = self
+        humanGrow.action = #selector(toggleHumanTall)
+        humanGrow.translatesAutoresizingMaskIntoConstraints = false
+        humanPanel.addSubview(humanGrow)
+
+        humanInput.placeholderString = "Reply to orchestrator…"
+
+        humanPanelHeight = humanPanel.heightAnchor.constraint(equalToConstant: humanPreferredHeight)
         humanAskRowHeight = humanAskRow.heightAnchor.constraint(equalToConstant: 0)
+        humanChatStreamHeight = humanChatStream.heightAnchor.constraint(greaterThanOrEqualToConstant: 72)
+        humanInputHeight = humanInput.heightAnchor.constraint(equalToConstant: 48)
+        let humanW = humanPanel.widthAnchor.constraint(equalToConstant: leftHUDColW)
+        leftHUDPanelWidthConstraints.append(humanW)
         NSLayoutConstraint.activate([
             humanPanel.leadingAnchor.constraint(equalTo: leftHUDStack.leadingAnchor),
-            humanPanel.topAnchor.constraint(equalTo: trackPanel.bottomAnchor, constant: 8),
-            humanPanel.widthAnchor.constraint(equalToConstant: leftHUDColW),
+            humanPanel.topAnchor.constraint(equalTo: leftHUDStack.topAnchor, constant: 4),
+            humanW,
             humanPanelHeight!,
+            // Title at top (grip is on bottom edge)
             humanTitle.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor, constant: 12),
             humanTitle.topAnchor.constraint(equalTo: humanPanel.topAnchor, constant: 10),
-            humanTitle.trailingAnchor.constraint(lessThanOrEqualTo: humanToggle.leadingAnchor, constant: -4),
+            humanTitle.trailingAnchor.constraint(lessThanOrEqualTo: humanGrow.leadingAnchor, constant: -4),
+            humanGrow.trailingAnchor.constraint(equalTo: humanClear.leadingAnchor, constant: -2),
+            humanGrow.centerYAnchor.constraint(equalTo: humanTitle.centerYAnchor),
+            humanGrow.widthAnchor.constraint(equalToConstant: 22),
+            humanClear.trailingAnchor.constraint(equalTo: humanToggle.leadingAnchor, constant: -2),
+            humanClear.centerYAnchor.constraint(equalTo: humanTitle.centerYAnchor),
             humanToggle.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor, constant: -8),
             humanToggle.centerYAnchor.constraint(equalTo: humanTitle.centerYAnchor),
             humanToggle.widthAnchor.constraint(equalToConstant: 22),
             humanToggle.heightAnchor.constraint(equalToConstant: 20),
+            humanLockLabel.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor, constant: 10),
+            humanLockLabel.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor, constant: -10),
+            humanLockLabel.topAnchor.constraint(equalTo: humanTitle.bottomAnchor, constant: 4),
+            humanLockLabel.heightAnchor.constraint(equalToConstant: 16),
             humanOrchPop.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor, constant: 10),
             humanOrchPop.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor, constant: -10),
-            humanOrchPop.topAnchor.constraint(equalTo: humanTitle.bottomAnchor, constant: 6),
+            humanOrchPop.topAnchor.constraint(equalTo: humanTitle.bottomAnchor, constant: 4),
             humanOrchPop.heightAnchor.constraint(equalToConstant: 24),
-            humanInbox.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor, constant: 12),
-            humanInbox.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor, constant: -12),
-            humanInbox.topAnchor.constraint(equalTo: humanOrchPop.bottomAnchor, constant: 6),
+            humanAllBanner.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor, constant: 10),
+            humanAllBanner.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor, constant: -10),
+            humanAllBanner.topAnchor.constraint(equalTo: humanOrchPop.bottomAnchor, constant: 2),
+            humanAllBanner.heightAnchor.constraint(equalToConstant: 16),
+            humanChatStream.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor, constant: 8),
+            humanChatStream.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor, constant: -8),
+            humanChatStream.topAnchor.constraint(equalTo: humanAllBanner.bottomAnchor, constant: 4),
+            humanChatStreamHeight!,
+            // Legacy ask row collapsed
             humanAskRow.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor, constant: 8),
             humanAskRow.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor, constant: -8),
-            humanAskRow.topAnchor.constraint(equalTo: humanInbox.bottomAnchor, constant: 6),
+            humanAskRow.topAnchor.constraint(equalTo: humanChatStream.bottomAnchor, constant: 0),
             humanAskRowHeight!,
-            humanAskLabel.leadingAnchor.constraint(equalTo: humanAskRow.leadingAnchor, constant: 8),
-            humanAskLabel.trailingAnchor.constraint(equalTo: humanAskRow.trailingAnchor, constant: -8),
-            humanAskLabel.topAnchor.constraint(equalTo: humanAskRow.topAnchor, constant: 6),
-            humanDenyBtn.leadingAnchor.constraint(equalTo: humanAskRow.leadingAnchor, constant: 6),
-            humanDenyBtn.bottomAnchor.constraint(equalTo: humanAskRow.bottomAnchor, constant: -6),
-            humanDenyBtn.heightAnchor.constraint(equalToConstant: 22),
-            humanAcceptOnceBtn.leadingAnchor.constraint(equalTo: humanDenyBtn.trailingAnchor, constant: 4),
-            humanAcceptOnceBtn.centerYAnchor.constraint(equalTo: humanDenyBtn.centerYAnchor),
-            humanAcceptOnceBtn.heightAnchor.constraint(equalToConstant: 22),
-            humanAlwaysBtn.leadingAnchor.constraint(equalTo: humanAcceptOnceBtn.trailingAnchor, constant: 4),
-            humanAlwaysBtn.trailingAnchor.constraint(lessThanOrEqualTo: humanAskRow.trailingAnchor, constant: -6),
-            humanAlwaysBtn.centerYAnchor.constraint(equalTo: humanDenyBtn.centerYAnchor),
-            humanAlwaysBtn.heightAnchor.constraint(equalToConstant: 22),
-            humanAskRow.bottomAnchor.constraint(equalTo: humanInput.topAnchor, constant: -8),
+            humanAskRow.bottomAnchor.constraint(equalTo: humanAttachLabel.topAnchor, constant: -4),
+            humanAttachLabel.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor, constant: 12),
+            humanAttachLabel.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor, constant: -12),
+            humanAttachLabel.heightAnchor.constraint(equalToConstant: 14),
+            humanAttachLabel.bottomAnchor.constraint(equalTo: humanInput.topAnchor, constant: -4),
             humanInput.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor, constant: 10),
-            humanInput.bottomAnchor.constraint(equalTo: humanPanel.bottomAnchor, constant: -10),
-            humanInput.heightAnchor.constraint(equalToConstant: 24),
+            // Input sits above bottom resize grip
+            humanInput.bottomAnchor.constraint(equalTo: humanVResizeGrip.topAnchor, constant: -6),
+            humanInputHeight!,
             humanSend.leadingAnchor.constraint(equalTo: humanInput.trailingAnchor, constant: 6),
             humanSend.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor, constant: -10),
-            humanSend.centerYAnchor.constraint(equalTo: humanInput.centerYAnchor),
+            humanSend.bottomAnchor.constraint(equalTo: humanInput.bottomAnchor),
             humanSend.widthAnchor.constraint(equalToConstant: 44),
+            humanSend.heightAnchor.constraint(equalToConstant: 28),
             humanInput.trailingAnchor.constraint(equalTo: humanSend.leadingAnchor, constant: -6),
+            // Bottom-edge height grip (standard resize chrome)
+            humanVResizeGrip.leadingAnchor.constraint(equalTo: humanPanel.leadingAnchor),
+            humanVResizeGrip.trailingAnchor.constraint(equalTo: humanPanel.trailingAnchor),
+            humanVResizeGrip.bottomAnchor.constraint(equalTo: humanPanel.bottomAnchor),
+            humanVResizeGrip.heightAnchor.constraint(equalToConstant: 6),
         ])
+        // Click attach label to clear staged files
+        let clearClick = NSClickGestureRecognizer(target: self, action: #selector(clearHumanAttachments))
+        humanAttachLabel.addGestureRecognizer(clearClick)
         refreshHumanDock()
         reloadHumanOrchPicker()
+        applyHumanFocusLock()
+    }
+
+    @objc private func humanVResizePan(_ g: NSPanGestureRecognizer) {
+        switch g.state {
+        case .began:
+            humanVResizeStartY = g.location(in: self).y
+            humanVResizeStartH = humanPreferredHeight
+            humanExpanded = true
+        case .changed:
+            // Flipped: drag up (higher y in window coords often down in view) — use delta
+            let dy = g.location(in: self).y - humanVResizeStartY
+            // In AppKit default coords, y grows up; dragging grip down increases height
+            let maxH = max(200, bounds.height * 0.7)
+            humanPreferredHeight = min(maxH, max(160, humanVResizeStartH - dy))
+            applyHumanPanelSize()
+        case .ended, .cancelled:
+            persistHUDPrefs()
+        default: break
+        }
+    }
+
+    private func stageHumanFiles(_ paths: [String]) {
+        guard !paths.isEmpty else { return }
+        var seen = Set(humanPendingFiles)
+        for p in paths {
+            let t = p.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty, !seen.contains(t) else { continue }
+            seen.insert(t)
+            humanPendingFiles.append(t)
+        }
+        // Cap staged list
+        if humanPendingFiles.count > 40 {
+            humanPendingFiles = Array(humanPendingFiles.suffix(40))
+        }
+        updateHumanAttachLabel()
+        if !humanExpanded {
+            humanExpanded = true
+            refreshHumanDock()
+        }
+        Pong.log("human panel staged files n=\(humanPendingFiles.count)")
+    }
+
+    private func updateHumanAttachLabel() {
+        if humanPendingFiles.isEmpty {
+            humanAttachLabel.isHidden = true
+            humanAttachLabel.stringValue = ""
+            return
+        }
+        humanAttachLabel.isHidden = false
+        let n = humanPendingFiles.count
+        let preview = humanPendingFiles.prefix(2).map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+        let more = n > 2 ? " +\(n - 2)" : ""
+        humanAttachLabel.stringValue = "📎 \(n) file\(n == 1 ? "" : "s"): \(preview)\(more)  · click to clear"
+    }
+
+    @objc private func clearHumanAttachments() {
+        humanPendingFiles.removeAll()
+        updateHumanAttachLabel()
+    }
+
+    @objc private func toggleHumanTall() {
+        humanTall.toggle()
+        // Snap presets still available via ↕
+        humanPreferredHeight = humanTall ? min(bounds.height * 0.65, 480) : 280
+        applyHumanPanelSize()
+        persistHUDPrefs()
+    }
+
+    @objc private func clearHumanHistory() {
+        guard let session = resolvedSendSession() else { return }
+        HumanConsoleController.clearHistory(session: session)
+        reloadHumanInbox()
+    }
+
+    private func applyHumanPanelSize() {
+        guard humanExpanded else { return }
+        var h = humanPreferredHeight
+        let maxH = max(200, bounds.height * 0.7)
+        h = min(maxH, max(160, h))
+        humanPreferredHeight = h
+        humanPanelHeight?.constant = h
+        // Input grows with panel (~18–28% of body)
+        let inputH = max(36, min(140, h * 0.22))
+        humanInputHeight?.constant = inputH
+        let chrome: CGFloat = 100 + (humanAllBanner.isHidden ? 0 : 18)
+        humanChatStreamHeight?.constant = max(72, h - chrome - inputH)
+        humanPanel.needsLayout = true
+        leftHUDStack.layoutSubtreeIfNeeded()
+        leftHUDScroll.reflectScrolledClipView(leftHUDScroll.contentView)
     }
 
     /// Per-agent work recap under YOU — not generic status events.
@@ -1440,11 +2055,13 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         taskPanel.addSubview(taskBody)
 
         taskPanelHeight = taskPanel.heightAnchor.constraint(equalToConstant: 168)
+        let taskW = taskPanel.widthAnchor.constraint(equalToConstant: leftHUDColW)
+        leftHUDPanelWidthConstraints.append(taskW)
         // TASKS sits under CRON (cron is between YOU and TASKS on the left stack)
         NSLayoutConstraint.activate([
             taskPanel.leadingAnchor.constraint(equalTo: leftHUDStack.leadingAnchor),
             taskPanel.topAnchor.constraint(equalTo: cronPanel.bottomAnchor, constant: 8),
-            taskPanel.widthAnchor.constraint(equalToConstant: leftHUDColW),
+            taskW,
             taskPanelHeight!,
             taskTitle.leadingAnchor.constraint(equalTo: taskPanel.leadingAnchor, constant: 12),
             taskTitle.topAnchor.constraint(equalTo: taskPanel.topAnchor, constant: 10),
@@ -1458,11 +2075,16 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
     }
 
     func openHumanDock(session: String) {
-        humanSession = session
+        // Respect top-bar single-team lock
+        if let focus = focusedTeamSession, focus != "__all__", !focus.isEmpty {
+            humanSession = focus
+        } else {
+            humanSession = session
+            lastSingleTeamFocus = session
+        }
         humanExpanded = true
         reloadHumanOrchPicker()
-        // Prefer the requested session in the dropdown
-        selectHumanOrch(session: session)
+        selectHumanOrch(session: humanSession)
         refreshHumanDock()
         reloadHumanInbox()
         relayoutHumanToLinkedOrch()
@@ -1483,22 +2105,29 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         humanPanel.isHidden = false
         humanToggle.title = humanExpanded ? "▾" : "▸"
         humanToggle.toolTip = humanExpanded ? "Collapse" : "Expand"
-        humanOrchPop.isHidden = !humanExpanded
-        humanInbox.isHidden = !humanExpanded
-        humanAskRow.isHidden = !humanExpanded || humanAskRowHeight?.constant == 0
+        humanChatStream.isHidden = !humanExpanded
+        humanAskRow.isHidden = true
         humanInput.isHidden = !humanExpanded
         humanSend.isHidden = !humanExpanded
+        humanClear.isHidden = !humanExpanded
+        humanGrow.isHidden = !humanExpanded
+        humanVResizeGrip.isHidden = !humanExpanded
+        humanAttachLabel.isHidden = !humanExpanded || humanPendingFiles.isEmpty
         if humanExpanded {
-            let askOn = !(humanAskRowHeight?.constant == 0)
-            humanPanelHeight?.constant = askOn ? 300 : 228
+            applyHumanFocusLock()
+            applyHumanPanelSize()
+            updateHumanAttachLabel()
+            reloadHumanInbox()
         } else {
             humanPanelHeight?.constant = 34
+            humanOrchPop.isHidden = true
+            humanLockLabel.isHidden = true
+            humanAllBanner.isHidden = true
+            humanPanel.needsLayout = true
+            leftHUDStack.layoutSubtreeIfNeeded()
+            leftHUDScroll.reflectScrolledClipView(leftHUDScroll.contentView)
         }
-        humanPanel.needsLayout = true
         layoutSubtreeIfNeeded()
-        // Expand/collapse changes document height — keep scroll content in sync
-        leftHUDStack.layoutSubtreeIfNeeded()
-        leftHUDScroll.reflectScrolledClipView(leftHUDScroll.contentView)
     }
 
     /// Fill dropdown with every known orchestrator (all teams).
@@ -1539,14 +2168,31 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
     }
 
     @objc private func humanOrchChanged() {
+        // Single-team focus: picker is locked — ignore / reset
+        if let focus = focusedTeamSession, focus != "__all__", !focus.isEmpty {
+            selectHumanOrch(session: focus)
+            humanSession = focus
+            applyHumanFocusLock()
+            return
+        }
         if let s = humanOrchPop.selectedItem?.representedObject as? String {
             humanSession = s
+            lastSingleTeamFocus = s
+            applyHumanFocusLock()
             reloadHumanInbox()
             reloadTaskRecap()
             reloadCronTimeline()
-            // YOU seat + floor line follow the orchestrator this human window is wired to
             relayoutHumanToLinkedOrch()
         }
+    }
+
+    /// Lightweight poll from PanelController timer — refresh asks without Focus window.
+    func pollHumanConsole() {
+        guard humanExpanded else { return }
+        if let focus = focusedTeamSession, focus != "__all__", !focus.isEmpty {
+            humanSession = focus
+        }
+        reloadHumanInbox()
     }
 
     /// Move the YOU blob and rewire YOU→orch to `humanSession` (console dropdown).
@@ -1751,74 +2397,44 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         if humanOrchPop.numberOfItems == 0 || PairState.listPairs().count != humanOrchPop.numberOfItems {
             reloadHumanOrchPicker()
         }
+        // Single-team focus always wins
+        if let focus = focusedTeamSession, focus != "__all__", !focus.isEmpty {
+            humanSession = focus
+        }
+        applyHumanFocusLock()
+        let teamName = teamDisplayName(for: humanSession)
         guard !humanSession.isEmpty else {
-            humanInbox.stringValue = "Pick an orchestrator above."
             humanTitle.stringValue = "YOU · HUMAN"
-            setHumanAskVisible(false)
+            humanChatStream.reload(
+                messages: [],
+                pendingAsk: nil,
+                emptyHint: focusedTeamSession == "__all__"
+                    ? "Pick an orchestrator above (All teams mode)."
+                    : "Select a team in the top bar.",
+                force: true
+            )
             return
         }
-        var lines: [String] = []
-        let snap = Pong.loadJSON(Pong.stateDir + "/snapshot.json")
-        let team = ((snap["teams"] as? [[String: Any]]) ?? []).first { ($0["session"] as? String) == humanSession }
-        let openJobs = ((team?["jobs"] as? [String: Any])?["open"] as? [[String: Any]]) ?? []
-        let workers = (team?["workers"] as? [[String: Any]]) ?? []
-        var asks = 0
-        for w in workers {
-            let h = ((w["status_hint"] as? String) ?? "").lowercased()
-            if h.contains("human") || h.contains("takeover") || h.contains("ask") {
-                let lab = (w["label"] as? String) ?? (w["id"] as? String) ?? "?"
-                lines.append("• \(lab) needs you")
-                asks += 1
-            }
-        }
-        for j in openJobs {
-            let st = ((j["status"] as? String) ?? "").lowercased()
-            if st.contains("human") || st.contains("ask") {
-                let prev = (j["task_preview"] as? String) ?? (j["id"] as? String) ?? "job"
-                lines.append("• \(String(prev.prefix(48)))")
-                asks += 1
-            }
-        }
-        if asks == 0 { lines.append("No open asks.") }
-        let log = HumanConsoleController.logPath(session: humanSession)
-        if let data = try? String(contentsOfFile: log, encoding: .utf8), !data.isEmpty {
-            lines.append("── recent ──")
-            lines.append(String(data.suffix(400)))
-        }
-        humanInbox.stringValue = lines.joined(separator: "\n")
-
-        // Structured / synthesized ask → Deny · Accept once · Always accept
-        if let ask = HumanConsoleController.loadPendingAsk(session: humanSession) {
-            humanAskLabel.stringValue = ask.question
-            setHumanAskVisible(true)
-            humanTitle.stringValue = "YOU · DECIDE"
+        let ask = HumanConsoleController.loadPendingAsk(session: humanSession)
+        let cards = HumanConsoleController.loadCards(session: humanSession, limit: 60)
+        if ask != nil {
+            humanTitle.stringValue = "YOU · \(teamName) · DECIDE"
         } else {
-            setHumanAskVisible(false)
-            humanTitle.stringValue = asks > 0 ? "YOU · \(asks) ASK(S)" : "YOU · HUMAN"
+            humanTitle.stringValue = "YOU · \(teamName)"
         }
+        humanChatStream.reload(
+            messages: cards,
+            pendingAsk: ask,
+            emptyHint: "No messages · team locked to \(teamName)",
+            force: false
+        )
+        // Keep legacy ask row collapsed — interaction is on stream cards
+        humanAskRow.isHidden = true
+        humanAskRowHeight?.constant = 0
     }
-
-    private func setHumanAskVisible(_ on: Bool) {
-        humanAskRow.isHidden = !on
-        humanAskRowHeight?.constant = on ? 72 : 0
-        if humanExpanded {
-            humanPanelHeight?.constant = on ? 300 : 228
-        }
-        humanPanel.needsLayout = true
-        leftHUDStack.layoutSubtreeIfNeeded()
-        leftHUDScroll.reflectScrolledClipView(leftHUDScroll.contentView)
-    }
-
-    @objc private func humanDenyAsk() { humanRespondAsk(.deny) }
-    @objc private func humanAcceptOnceAsk() { humanRespondAsk(.acceptOnce) }
-    @objc private func humanAlwaysAsk() { humanRespondAsk(.alwaysAccept) }
 
     private func humanRespondAsk(_ decision: HumanAskDecision) {
-        if let s = humanOrchPop.selectedItem?.representedObject as? String {
-            humanSession = s
-        }
-        let session = humanSession
-        guard !session.isEmpty else { return }
+        guard let session = resolvedSendSession() else { return }
         pulseHumanOrchLink(session: session)
         DispatchQueue.global(qos: .userInitiated).async {
             _ = HumanConsoleController.respondToAsk(session: session, decision: decision)
@@ -1826,16 +2442,55 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         }
     }
 
-    @objc private func sendHumanChat() {
-        // Always use the dropdown selection
-        if let s = humanOrchPop.selectedItem?.representedObject as? String {
-            humanSession = s
+    private func humanTapJob(_ jobId: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(jobId, forType: .string)
+        PanelController.shared.goToMission()
+        Pong.log("human chat job chip → Mission job=\(jobId) (copied)")
+    }
+
+    private func humanTapSeat(_ seatId: String) {
+        let sess = humanSession
+        guard !sess.isEmpty else { return }
+        let gid = "\(sess)::\(seatId)"
+        if let seat = seats.first(where: { $0.globalId == gid })
+            ?? seats.first(where: { $0.session == sess && $0.id == seatId }) {
+            let mid = convert(NSPoint(x: bounds.midX, y: bounds.midY), from: nil)
+            // Prefer module card near center of map
+            showModuleCard(for: seat, near: NSPoint(x: bounds.midX * 0.55, y: bounds.midY * 0.55))
+            _ = mid
+            Pong.log("human chat seat chip → \(gid)")
+        } else {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(seatId, forType: .string)
+            Pong.log("human chat seat chip copy \(seatId)")
         }
-        let text = humanInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !humanSession.isEmpty else { return }
+    }
+
+    @objc private func sendHumanChat() {
+        guard let session = resolvedSendSession() else { return }
+        let typed = humanInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let files = humanPendingFiles
+        guard !typed.isEmpty || !files.isEmpty else { return }
+        // Free-text reply to open ask (open-ended questions)
+        var text = typed
+        if let ask = HumanConsoleController.loadPendingAsk(session: session), !typed.isEmpty {
+            if !typed.lowercased().hasPrefix("deny") && !typed.lowercased().hasPrefix("accept") {
+                text = "Reply to ask:\n\(ask.question)\n\n\(typed)"
+            }
+        }
         humanInput.stringValue = ""
-        let session = humanSession
-        // Pulse YOU → orch floor dots for the linger window — only after a real send.
+        humanPendingFiles.removeAll()
+        updateHumanAttachLabel()
+        if !files.isEmpty {
+            let list = files.map { "- \($0)" }.joined(separator: "\n")
+            let block = "Attached files:\n\(list)"
+            text = text.isEmpty ? block : "\(text)\n\n\(block)"
+        }
+        if focusedTeamSession == "__all__" {
+            humanAllBanner.isHidden = false
+            humanAllBanner.stringValue = "Sending to: \(teamDisplayName(for: session))"
+        }
         pulseHumanOrchLink(session: session)
         DispatchQueue.global(qos: .userInitiated).async {
             _ = HumanConsoleController.deliver(session: session, text: text)
@@ -1857,40 +2512,123 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         requestMapRender()
     }
 
+    /// Right ops rail: compact legend + TRACKING list; expands on hover.
+    private var rightOpsExpanded = false
+    private var rightOpsTracking: NSTrackingArea?
+
     private func setupLegend() {
-        // Frame-based (no Auto Layout) — avoids init crashes when panels are chained
-        // before the map view is in a window hierarchy.
         legendPanel.wantsLayer = true
-        legendPanel.layer?.backgroundColor = NSColor(calibratedWhite: 0.04, alpha: 0.85).cgColor
-        legendPanel.layer?.cornerRadius = 6
+        legendPanel.layer?.backgroundColor = NSColor(calibratedWhite: 0.04, alpha: 0.92).cgColor
+        legendPanel.layer?.cornerRadius = 8
         legendPanel.layer?.borderWidth = 1
-        legendPanel.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.1).cgColor
+        legendPanel.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.12).cgColor
         legendPanel.translatesAutoresizingMaskIntoConstraints = true
+        legendPanel.toolTip = "Hover to expand live agent tracking"
         addSubview(legendPanel)
 
+        rebuildRightOpsContent()
+        layoutRightHUD()
+        installRightOpsTracking()
+    }
+
+    private func rebuildRightOpsContent() {
         legendPanel.subviews.forEach { $0.removeFromSuperview() }
-        let lines = [
+        let expanded = rightOpsExpanded
+        let w: CGFloat = expanded ? 220 : 132
+        var y: CGFloat = 8
+
+        // Header
+        let head = NSTextField(labelWithString: expanded ? "TRACKING · LIVE" : "TRACKING")
+        head.font = PongTheme.labelFont(9)
+        head.textColor = PongTheme.textSecondary
+        head.isBordered = false
+        head.drawsBackground = false
+        head.frame = NSRect(x: 10, y: y, width: w - 20, height: 14)
+        legendPanel.addSubview(head)
+        y += 18
+
+        // Live status (compact when collapsed)
+        let bodyText = trackBody.stringValue.isEmpty
+            ? "No seats"
+            : trackBody.stringValue
+        let body = NSTextField(wrappingLabelWithString: bodyText)
+        body.font = PongTheme.mono(9)
+        body.textColor = PongTheme.textPrimary
+        body.isBordered = false
+        body.drawsBackground = false
+        body.maximumNumberOfLines = expanded ? 16 : 3
+        let bodyH: CGFloat = expanded ? min(200, max(48, CGFloat(bodyText.split(separator: "\n").count) * 13 + 8)) : 42
+        body.frame = NSRect(x: 10, y: y, width: w - 20, height: bodyH)
+        legendPanel.addSubview(body)
+        // Keep reference path for refreshTrackingList via trackBody text
+        trackBody.stringValue = bodyText
+        y += bodyH + 8
+
+        // Divider + legend key
+        let div = NSView(frame: NSRect(x: 10, y: y, width: w - 20, height: 1))
+        div.wantsLayer = true
+        div.layer?.backgroundColor = PongTheme.lineSoft.cgColor
+        legendPanel.addSubview(div)
+        y += 8
+
+        let lines: [(String, String, NSColor)] = [
             ("—", "Idle link", NSColor(calibratedWhite: 1, alpha: 0.25)),
             ("—", "Active / job", NSColor(calibratedWhite: 1, alpha: 0.7)),
-            ("◆", "YOU (human)", PongTheme.amber),
-            ("⬡", "Orchestrator", PongTheme.blue),
+            ("◆", "YOU", PongTheme.amber),
+            ("⬡", "Orch", PongTheme.blue),
             ("■", "Agent", PongTheme.magenta),
-            ("▲", "Sub-agent", PongTheme.violet),
+            ("▲", "Sub", PongTheme.violet),
         ]
-        var y: CGFloat = 8
-        let h: CGFloat = CGFloat(lines.count) * 18 + 16
-        for (sym, name, col) in lines.reversed() {
+        let keyLines = expanded ? lines : Array(lines.prefix(4))
+        for (sym, name, col) in keyLines {
             let s = NSTextField(labelWithString: "\(sym)  \(name)")
             s.font = PongTheme.labelFont(9)
             s.textColor = col
             s.isBordered = false
             s.drawsBackground = false
-            s.frame = NSRect(x: 10, y: y, width: 120, height: 14)
+            s.frame = NSRect(x: 10, y: y, width: w - 20, height: 14)
             legendPanel.addSubview(s)
-            y += 18
+            y += 16
         }
-        legendPanel.frame = NSRect(x: 14, y: 14, width: 130, height: h)
-        legendPanel.autoresizingMask = [.minXMargin, .maxYMargin]
+        if !expanded {
+            let hint = NSTextField(labelWithString: "hover · expand")
+            hint.font = PongTheme.labelFont(8)
+            hint.textColor = PongTheme.textTertiary
+            hint.isBordered = false
+            hint.drawsBackground = false
+            hint.frame = NSRect(x: 10, y: y, width: w - 20, height: 12)
+            legendPanel.addSubview(hint)
+            y += 14
+        }
+        let h = y + 8
+        // Position set in layoutRightHUD
+        legendPanel.frame.size = NSSize(width: w, height: h)
+    }
+
+    private func installRightOpsTracking() {
+        if let old = rightOpsTracking {
+            legendPanel.removeTrackingArea(old)
+        }
+        let t = NSTrackingArea(
+            rect: legendPanel.bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: ["role": "rightOps"]
+        )
+        legendPanel.addTrackingArea(t)
+        rightOpsTracking = t
+    }
+
+    private func setRightOpsExpanded(_ on: Bool) {
+        guard rightOpsExpanded != on else { return }
+        rightOpsExpanded = on
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.18
+            ctx.allowsImplicitAnimation = true
+            rebuildRightOpsContent()
+            layoutRightHUD()
+        })
+        installRightOpsTracking()
     }
 
     /// CRON list on the **left** stack: TRACKING → YOU → CRON → TASKS
@@ -1942,10 +2680,12 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         cronPanel.addSubview(cronBody)
 
         cronPanelHeightConstraint = cronPanel.heightAnchor.constraint(equalToConstant: 160)
+        let cronW = cronPanel.widthAnchor.constraint(equalToConstant: leftHUDColW)
+        leftHUDPanelWidthConstraints.append(cronW)
         NSLayoutConstraint.activate([
             cronPanel.leadingAnchor.constraint(equalTo: leftHUDStack.leadingAnchor),
             cronPanel.topAnchor.constraint(equalTo: humanPanel.bottomAnchor, constant: 8),
-            cronPanel.widthAnchor.constraint(equalToConstant: leftHUDColW),
+            cronW,
             cronPanelHeightConstraint!,
             cronTitle.leadingAnchor.constraint(equalTo: cronPanel.leadingAnchor, constant: 12),
             cronTitle.topAnchor.constraint(equalTo: cronPanel.topAnchor, constant: 10),
@@ -2393,14 +3133,15 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         }
     }
 
-    /// Legend stays top-right (cron moved to left stack under YOU).
-    private func layoutRightHUD() {
+    /// Right ops rail (TRACKING + legend) top-right; cron stays left under YOU.
+    private func layoutRightHUD(in hostBounds: NSRect? = nil) {
+        let b = hostBounds ?? bounds
         let pad: CGFloat = 14
-        let legendH = max(legendPanel.frame.height, 120)
-        let legendW: CGFloat = 130
-        let top = bounds.height > 1 ? bounds.height : 720
+        let legendW = legendPanel.frame.width > 1 ? legendPanel.frame.width : (rightOpsExpanded ? 220 : 132)
+        let legendH = max(legendPanel.frame.height, rightOpsExpanded ? 160 : 110)
+        let top = b.height > 1 ? b.height : 720
         legendPanel.frame = NSRect(
-            x: max(pad, bounds.width - legendW - pad),
+            x: max(pad, b.width - legendW - pad),
             y: top - pad - legendH,
             width: legendW,
             height: legendH
@@ -2526,6 +3267,9 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         trackBody.stringValue = lines.joined(separator: "\n")
         trackBody.textColor = NSColor(calibratedRed: 0.90, green: 0.93, blue: 0.95, alpha: 1)
         trackTitle.textColor = NSColor(calibratedRed: 0.55, green: 0.60, blue: 0.64, alpha: 1)
+        // Refresh right ops rail content (TRACKING + legend)
+        rebuildRightOpsContent()
+        layoutRightHUD()
     }
 
     /// Pause expensive SceneKit while Mission/Setup are up.
@@ -2566,10 +3310,18 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
     }
 
     override func mouseEntered(with event: NSEvent) {
+        if let role = event.trackingArea?.userInfo?["role"] as? String, role == "rightOps" {
+            setRightOpsExpanded(true)
+            return
+        }
         processHover(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
+        if let role = event.trackingArea?.userInfo?["role"] as? String, role == "rightOps" {
+            setRightOpsExpanded(false)
+            return
+        }
         clearHover()
     }
 
@@ -3043,10 +3795,15 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         dismissModuleCard()
         moduleSeat = s
         let role = s.role == "subagent" ? "worker" : s.role
+        // Orchestrator: show team display name over the seat (not seat id)
+        let teamLab: String = {
+            if s.role == "conductor" { return teamDisplayName(for: s.session) }
+            return multiTeam ? teamDisplayName(for: s.session) : ""
+        }()
         let model = AgentNodeModel(
             session: s.session, id: s.id, role: role,
             title: s.title, subtitle: s.subtitle, detail: s.detail,
-            status: s.status, teamLabel: s.id.uppercased(),
+            status: s.status, teamLabel: teamLab,
             accent: roleColor(s), origin: .zero
         )
         let card = AgentNodeView(model: model)
@@ -3077,6 +3834,10 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
             guard let self, let seat = self.moduleSeat else { return }
             self.onPerms?(seat)
         }
+        card.onChangeModel = { [weak self] _ in
+            guard let self, let seat = self.moduleSeat else { return }
+            self.onChangeModel?(seat)
+        }
         // Host with thin chrome + close
         let pad: CGFloat = 12
         let host = NSView(frame: NSRect(
@@ -3094,7 +3855,7 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         host.layer?.shadowRadius = 18
         host.layer?.shadowOffset = .zero
 
-        let cap = NSTextField(labelWithString: "MODULE  ·  Edit renames  ·  Open → terminal only")
+        let cap = NSTextField(labelWithString: "MODULE  ·  Pencil renames  ·  Open → terminal only")
         cap.font = PongTheme.labelFont(9)
         cap.textColor = PongSheetChrome.limeDim
         cap.frame = NSRect(x: pad, y: host.bounds.height - 18, width: 260, height: 14)
@@ -3215,11 +3976,26 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
 
     func reload(seats: [Seat3D], multiTeam: Bool) {
         // Include ephemeral ids so spawn/vanish always rebuilds layout
-        let sig = seats.map {
+        var sig = seats.map {
             "\($0.globalId)|\($0.status)|\($0.openJobs)|\($0.title)|\($0.flowHint.prefix(12))|\($0.ephemeral ? "E" : "P")"
         }.joined(separator: ";") + (multiTeam ? "|M" : "|S")
+        // Edge identity is NOT captured by the seat fields above. Without this,
+        // editing/adding/deleting a flow link leaves the seats unchanged, the
+        // signature matches, and the early-out below skips layoutSeats() so the
+        // edges never repaint until a seat changes or the app relaunches. Fold a
+        // per-session edge signature in so any link mutation invalidates the cache.
+        let db = PairState.loadPairsDb()
+        for session in Array(Set(seats.filter { $0.role != "human" }.map(\.session))).sorted() {
+            let entry = db[session] as? [String: Any] ?? [:]
+            let edges = FlowGraph.load(from: entry)
+                .map { "\($0.from)>\($0.to):\($0.kind)" }
+                .sorted()
+            sig += "#\(session):" + edges.joined(separator: ",")
+        }
         self.seats = seats
         self.multiTeam = multiTeam
+        // Keep open module card in sync (rename / status) without forcing reopen
+        syncModuleCard(with: seats)
         // Poll path: skip full graph rebuild when nothing meaningful changed
         sceneLock.lock()
         defer { sceneLock.unlock() }
@@ -3236,6 +4012,61 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         layoutSeats()
         requestMapRender()
         reevaluateMapPlaying()
+    }
+
+    /// Instant title/detail refresh on the floating kill/open card after rename.
+    private func syncModuleCard(with seats: [Seat3D]) {
+        guard let seat = moduleSeat, let card = moduleCard else { return }
+        guard let fresh = seats.first(where: { $0.globalId == seat.globalId }) else {
+            // Seat gone — close card
+            dismissModuleCard()
+            return
+        }
+        moduleSeat = fresh
+        let role = fresh.role == "subagent" ? "worker" : fresh.role
+        let teamLab = fresh.role == "conductor" || multiTeam
+            ? teamDisplayName(for: fresh.session) : ""
+        let model = AgentNodeModel(
+            session: fresh.session, id: fresh.id, role: role,
+            title: fresh.title, subtitle: fresh.subtitle, detail: fresh.detail,
+            status: fresh.status, teamLabel: teamLab,
+            accent: roleColor(fresh), origin: .zero
+        )
+        card.apply(model)
+    }
+
+    /// Optimistic rename — module card + 3D face title update without reopen.
+    func applySeatTitle(globalId: String, title: String) {
+        guard let i = seats.firstIndex(where: { $0.globalId == globalId }) else { return }
+        let prev = seats[i]
+        let s = Seat3D(
+            session: prev.session, id: prev.id, role: prev.role,
+            title: title, subtitle: prev.subtitle, detail: prev.detail,
+            status: prev.status, parentId: prev.parentId,
+            openJobs: prev.openJobs, flowHint: prev.flowHint,
+            missionRole: prev.missionRole, ephemeral: prev.ephemeral,
+            accent: prev.accent
+        )
+        seats[i] = s
+        if let n = seatNodes[globalId] {
+            // Force face texture rebuild (title is in seatFaceContentKey)
+            n.setValue(nil as String?, forKey: "lastFaceKey")
+            updateBlobMaterial(n, seat: s)
+        }
+        if moduleSeat?.globalId == globalId {
+            moduleSeat = s
+            let role = s.role == "subagent" ? "worker" : s.role
+            let teamLab = s.role == "conductor" || multiTeam
+                ? teamDisplayName(for: s.session) : ""
+            moduleCard?.apply(AgentNodeModel(
+                session: s.session, id: s.id, role: role,
+                title: title, subtitle: s.subtitle, detail: s.detail,
+                status: s.status, teamLabel: teamLab,
+                accent: roleColor(s), origin: .zero
+            ))
+        }
+        lastSeatsSig = ""
+        requestMapRender()
     }
 
     /// Call from camera/pan gestures — defers poll work until idle.
@@ -3697,6 +4528,10 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
             label.constraints = [SCNBillboardConstraint()]
             root.addChildNode(label)
         }
+        // Floating team display name above each orchestrator (always visible, billboarded)
+        if s.role == "conductor" {
+            attachTeamTitle(to: root, seat: s, color: full)
+        }
         root.setValue(s.role, forKey: "seatRole")
 
         // Drop line to plane (short)
@@ -3887,6 +4722,134 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         n.name = "human-title"
         n.renderingOrder = 30
         return n
+    }
+
+    /// Truncate team labels for floating orch titles (~18–24 chars).
+    private func truncateTeamLabel(_ raw: String, maxChars: Int = 22) -> String {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return "Team" }
+        if t.count <= maxChars { return t }
+        return String(t.prefix(max(4, maxChars - 1))) + "…"
+    }
+
+    private func teamTitleContentKey(for s: Seat3D) -> String {
+        let name = teamDisplayName(for: s.session)
+        // Theme + seat accent hash so rename / light-dark / neon flip refresh the pill
+        let accentTag = s.accent.map { String(describing: $0) } ?? "role"
+        return "team|\(s.session)|\(name)|\(mapIsDark)|\(accentTag)"
+    }
+
+    /// Attach or refresh the billboarded team name above a conductor hex.
+    private func attachTeamTitle(to root: SCNNode, seat: Seat3D, color: NSColor) {
+        let key = teamTitleContentKey(for: seat)
+        if (root.value(forKey: "lastTeamTitleKey") as? String) == key,
+           root.childNode(withName: "team-title", recursively: false) != nil {
+            return
+        }
+        root.childNode(withName: "team-title", recursively: false)?.removeFromParentNode()
+        let name = truncateTeamLabel(teamDisplayName(for: seat.session))
+        let label = makeTeamTitleNode(name: name, color: color)
+        // Hex body top ≈ local y 2.0 — float just above, not occluding the face
+        label.position = SCNVector3(0, 2.52, 0)
+        label.constraints = [SCNBillboardConstraint()]
+        root.addChildNode(label)
+        root.setValue(key, forKey: "lastTeamTitleKey")
+    }
+
+    /// Elegant pill + kerned mono team name (dark/light readable).
+    /// Integer plane sizes + retina bitmap; hide when camera is far (see updateDecorLabelVisibility).
+    private func makeTeamTitleNode(name: String, color: NSColor) -> SCNNode {
+        let img = teamTitleImage(name: name, color: color)
+        // Snap world size to 0.05 steps — avoid fractional shimmer
+        let rawW = min(3.0, max(1.55, CGFloat(name.count) * 0.105 + 0.55))
+        let planeW = (rawW * 20).rounded() / 20
+        let planeH: CGFloat = 0.35
+        let plane = SCNPlane(width: planeW, height: planeH)
+        let m = SCNMaterial()
+        m.diffuse.contents = img
+        m.emission.contents = img
+        m.emission.intensity = 0.28
+        m.lightingModel = .constant
+        m.isDoubleSided = true
+        m.writesToDepthBuffer = false
+        m.diffuse.magnificationFilter = .linear
+        m.diffuse.minificationFilter = .linear
+        m.diffuse.mipFilter = .none
+        m.emission.magnificationFilter = .linear
+        m.emission.minificationFilter = .linear
+        m.emission.mipFilter = .none
+        plane.materials = [m]
+        let n = SCNNode(geometry: plane)
+        n.name = "team-title"
+        n.renderingOrder = 32
+        n.categoryBitMask = Self.hitDecor
+        n.setValue(Float(planeH), forKey: "labelWorldH")
+        return n
+    }
+
+    private func teamTitleImage(name: String, color: NSColor) -> NSImage {
+        let attr: [NSAttributedString.Key: Any] = [
+            .font: PongTheme.mono(20, weight: .semibold),
+            .foregroundColor: color,
+            .kern: 1.6,
+        ]
+        let text = name as NSString
+        let textSz = text.size(withAttributes: attr)
+        let padX: CGFloat = 18
+        let w = max(120, ceil(textSz.width) + padX * 2)
+        let h: CGFloat = 44
+        return rasterLabelImage(pointSize: NSSize(width: w, height: h)) { _ in
+            NSColor.clear.setFill()
+            NSRect(x: 0, y: 0, width: w, height: h).fill()
+            let pill = NSRect(x: 2, y: 4, width: w - 4, height: h - 8)
+            let path = NSBezierPath(roundedRect: pill, xRadius: 10, yRadius: 10)
+            if mapIsDark {
+                NSColor(calibratedWhite: 0.04, alpha: 0.82).setFill()
+            } else {
+                NSColor(calibratedWhite: 1.0, alpha: 0.90).setFill()
+            }
+            path.fill()
+            color.withAlphaComponent(mapIsDark ? 0.55 : 0.45).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            let tx = floor((w - textSz.width) / 2)
+            let ty = floor((h - textSz.height) / 2)
+            text.draw(at: NSPoint(x: tx, y: ty), withAttributes: attr)
+        }
+    }
+
+    /// 2× retina bitmap at integer pixel sizes so SCNPlane text stays sharp.
+    private func rasterLabelImage(pointSize: NSSize, draw: (CGFloat) -> Void) -> NSImage {
+        let scale: CGFloat = 2
+        let pw = max(2, Int(ceil(pointSize.width * scale)))
+        let ph = max(2, Int(ceil(pointSize.height * scale)))
+        let ptW = CGFloat(pw) / scale
+        let ptH = CGFloat(ph) / scale
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pw,
+            pixelsHigh: ph,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            return NSImage(size: NSSize(width: ptW, height: ptH))
+        }
+        rep.size = NSSize(width: ptW, height: ptH)
+        NSGraphicsContext.saveGraphicsState()
+        if let ctx = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.current = ctx
+            ctx.imageInterpolation = .high
+            draw(scale)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        let img = NSImage(size: NSSize(width: ptW, height: ptH))
+        img.addRepresentation(rep)
+        return img
     }
 
     /// YOU card: triangle coplanar with the upper-front octahedron facet (inclined diamond face).
@@ -4396,44 +5359,25 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         return img
     }
 
-    /// Seat glow / bob / face “ACTIVE” — can include “busy” seats with open work.
+    /// Seat glow / bob / face “ACTIVE” / plane ring pulse.
+    /// Same bar as floor dots: only real in-flight work — not queued/sticky “busy”.
+    /// When jobs finish (idle), primitives go calm immediately.
     private func isSeatActive(_ s: Seat3D) -> Bool {
-        let st = s.status.lowercased()
-        if st.contains("hidden") { return false }
-        if s.role == "human" { return st.contains("human") }
-        if st.contains("human") || st.contains("busy") || st.contains("running")
-            || st.contains("working") || st.contains("notified") {
-            return true
-        }
-        return false
+        seatIsActivelyWorking(s)
     }
 
     /// True when a seat is mid-handoff (data actually moving), not merely queued/busy.
-    /// Queued open jobs and sticky “busy” hints do **not** count — that kept dots always flying.
+    /// Shared with 2D canvas glow via `SeatActivity`.
     private func seatIsActivelyWorking(_ s: Seat3D) -> Bool {
-        let st = s.status.lowercased()
-        if st.contains("hidden") || st.contains("idle") { return false }
-        if s.role == "human" { return st.contains("human") }
-        // Real in-flight only
-        if st.contains("running") || st.contains("working") || st.contains("notified") {
-            return true
-        }
-        // Human takeover / ask is a real handoff signal
-        if st.contains("human") || st.contains("takeover") || st.contains("ask") {
-            return true
-        }
-        return false
+        SeatActivity.isActivelyWorking(status: s.status, role: s.role)
     }
 
     /// True when this directed link should show traveling packets *now*.
     private func linkHasLiveData(from: Seat3D, to: Seat3D) -> Bool {
-        // YOU ↔ orch: only when human is needed (or a brief pulse after Send — via linger)
-        if from.role == "human" || to.role == "human" {
-            return from.status.lowercased().contains("human")
-                || to.status.lowercased().contains("human")
-        }
-        // Packets only while real work is in flight on either end — not “busy + queued”
-        return seatIsActivelyWorking(to) || seatIsActivelyWorking(from)
+        SeatActivity.linkHasLiveData(
+            fromStatus: from.status, fromRole: from.role,
+            toStatus: to.status, toRole: to.role
+        )
     }
 
     /// Apply linger so a short handoff isn’t a one-frame blip.
@@ -4446,10 +5390,11 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         return (edgeFlowExpire[id] ?? 0) > now
     }
 
-    /// Full role accent (always) — use with idle mute.
+    /// Seat accent (neon catalog when set) else role default — use with idle mute.
     private func roleColor(_ s: Seat3D) -> NSColor {
         if s.role == "human" { return PongTheme.amber }
         if s.status.lowercased().contains("human") { return PongTheme.amber }
+        if let accent = s.accent { return accent }
         switch s.role {
         case "conductor": return PongTheme.blue
         case "subagent": return PongTheme.violet
@@ -4657,6 +5602,14 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         let baseY = (root.value(forKey: "baseY") as? Float) ?? Float(root.position.y)
         let pos = SCNVector3(root.position.x, CGFloat(baseY), root.position.z)
 
+        // Team floating title always tracks display_name / theme (even if face early-outs)
+        if seat.role == "conductor" {
+            attachTeamTitle(to: root, seat: seat, color: full)
+        } else {
+            root.childNode(withName: "team-title", recursively: false)?.removeFromParentNode()
+            root.setValue(nil as String?, forKey: "lastTeamTitleKey")
+        }
+
         let far = (root.value(forKey: "faceLODFar") as? Bool) ?? false
         let faceKey = "v23|" + contentKey + (far ? "|F" : "|N")
         if (root.value(forKey: "lastFaceKey") as? String) == faceKey {
@@ -4700,32 +5653,32 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         root.setValue(faceKey, forKey: "lastFaceKey")
     }
 
-    /// Single texture: chip + label (theme-aware).
+    /// Single texture: chip + label (theme-aware). Integer size + 2× raster.
     private func linkLabelImage(text: String, color: NSColor) -> NSImage {
-        let w: CGFloat = max(120, CGFloat(text.count) * 11 + 28)
+        let w: CGFloat = max(120, ceil(CGFloat(text.count) * 11 + 28))
         let h: CGFloat = 36
-        let img = NSImage(size: NSSize(width: w, height: h))
-        img.lockFocus()
-        if mapIsDark {
-            NSColor(calibratedWhite: 0.06, alpha: 0.88).setFill()
-        } else {
-            NSColor(calibratedWhite: 0.98, alpha: 0.94).setFill()
-        }
-        NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: w, height: h), xRadius: 5, yRadius: 5).fill()
-        (mapIsDark
-            ? NSColor(calibratedWhite: 0.35, alpha: 0.5)
-            : NSColor(calibratedWhite: 0.2, alpha: 0.35)).setStroke()
-        let border = NSBezierPath(roundedRect: NSRect(x: 0.5, y: 0.5, width: w - 1, height: h - 1), xRadius: 5, yRadius: 5)
-        border.lineWidth = 1
-        border.stroke()
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
             .foregroundColor: color.withAlphaComponent(0.9),
         ]
         let sz = (text as NSString).size(withAttributes: attrs)
-        (text as NSString).draw(at: NSPoint(x: (w - sz.width) / 2, y: (h - sz.height) / 2), withAttributes: attrs)
-        img.unlockFocus()
-        return img
+        return rasterLabelImage(pointSize: NSSize(width: w, height: h)) { _ in
+            if mapIsDark {
+                NSColor(calibratedWhite: 0.06, alpha: 0.88).setFill()
+            } else {
+                NSColor(calibratedWhite: 0.98, alpha: 0.94).setFill()
+            }
+            NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: w, height: h), xRadius: 5, yRadius: 5).fill()
+            (mapIsDark
+                ? NSColor(calibratedWhite: 0.35, alpha: 0.5)
+                : NSColor(calibratedWhite: 0.2, alpha: 0.35)).setStroke()
+            let border = NSBezierPath(roundedRect: NSRect(x: 1, y: 1, width: w - 2, height: h - 2), xRadius: 5, yRadius: 5)
+            border.lineWidth = 1
+            border.stroke()
+            let tx = floor((w - sz.width) / 2)
+            let ty = floor((h - sz.height) / 2)
+            (text as NSString).draw(at: NSPoint(x: tx, y: ty), withAttributes: attrs)
+        }
     }
 
     /// Exit point on the outer surface of a primitive (ellipsoid from body center).
@@ -4829,19 +5782,24 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
                 ? PongTheme.amber
                 : (active ? originCol : originCol.withAlphaComponent(0.55))
         )
-        let chipW = max(0.7, CGFloat(link.label.count) * 0.07 + 0.35)
-        let chipH: CGFloat = 0.22
+        let rawChipW = max(0.7, CGFloat(link.label.count) * 0.07 + 0.35)
+        let chipW = (rawChipW * 20).rounded() / 20
+        let chipH: CGFloat = 0.20
         let plate = SCNPlane(width: chipW, height: chipH)
         let plm = SCNMaterial()
         plm.diffuse.contents = chipImg
         plm.emission.contents = NSColor.black
         plm.lightingModel = .constant
         plm.isDoubleSided = true
+        plm.diffuse.magnificationFilter = .linear
+        plm.diffuse.minificationFilter = .linear
+        plm.diffuse.mipFilter = .none
         plate.materials = [plm]
         let plateN = SCNNode(geometry: plate)
         plateN.position = SCNVector3(midx, midy, midz)
         plateN.constraints = [SCNBillboardConstraint()]
         plateN.name = "plate:\(link.id)"
+        plateN.setValue(Float(chipH), forKey: "labelWorldH")
         plateN.categoryBitMask = Self.hitInteractive
         // Also name as lbl so click-to-edit still resolves
         let lblProxy = SCNNode()
@@ -4932,6 +5890,9 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         // Never block the render queue on a main-thread rebuild — skip a frame instead.
         guard sceneLock.try() else { return }
         advancePulse(now: time)
+        if let cam = scnView.pointOfView {
+            updateDecorLabelVisibility(camera: cam)
+        }
         sceneLock.unlock()
         // Always keep horizon level while user orbits/pans
         keepCameraHorizontal()
@@ -4941,6 +5902,40 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
         if !anyActive && !rulerDirty && !mapNeedsRender {
             // Keep a couple frames after gesture end, then sleep
             scnView.isPlaying = false
+        }
+    }
+
+    /// Hide team titles / link chips when projected height is below ~11–12 screen px
+    /// or camera is far — never show blurry subpixel mush.
+    private func updateDecorLabelVisibility(camera cam: SCNNode) {
+        let camPos = SIMD3<Float>(Float(cam.position.x), Float(cam.position.y), Float(cam.position.z))
+        let viewH = max(1, scnView.bounds.height)
+        let fovY = Float((cam.camera?.fieldOfView ?? 60) * .pi / 180)
+        let tanHalf = tan(fovY * 0.5)
+        let minScreenPx: Float = 11.5
+        let maxDist: Float = 28
+
+        func screenHeight(worldH: Float, dist: Float) -> Float {
+            guard dist > 0.05, tanHalf > 0.01 else { return 999 }
+            return (worldH / dist) * Float(viewH) / (2 * tanHalf)
+        }
+
+        for root in seatNodes.values {
+            guard let title = root.childNode(withName: "team-title", recursively: false) else { continue }
+            let wp = title.worldPosition
+            let p = SIMD3<Float>(Float(wp.x), Float(wp.y), Float(wp.z))
+            let dist = simd_length(p - camPos)
+            let worldH = (title.value(forKey: "labelWorldH") as? Float) ?? 0.35
+            let px = screenHeight(worldH: worldH, dist: dist)
+            title.isHidden = dist > maxDist || px < minScreenPx
+        }
+        for (key, node) in edgeNodes where key.hasSuffix(":plate") {
+            let wp = node.worldPosition
+            let p = SIMD3<Float>(Float(wp.x), Float(wp.y), Float(wp.z))
+            let dist = simd_length(p - camPos)
+            let worldH = (node.value(forKey: "labelWorldH") as? Float) ?? 0.20
+            let px = screenHeight(worldH: worldH, dist: dist)
+            node.isHidden = dist > maxDist * 0.9 || px < minScreenPx
         }
     }
 
@@ -5004,14 +5999,22 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
                     let a = 0.12 + 0.6 * descending
                     mat.diffuse.contents = col.withAlphaComponent(CGFloat(a))
                     mat.emission.contents = col.withAlphaComponent(CGFloat(a))
+                } else {
+                    // Work done → settle ring (no leftover “active” glow)
+                    mat.diffuse.contents = col.withAlphaComponent(0.08)
+                    mat.emission.contents = col.withAlphaComponent(0.02)
                 }
             }
-            if pulsing,
-               let shell = root.childNode(withName: "shell", recursively: false),
+            if let shell = root.childNode(withName: "shell", recursively: false),
                let sm = shell.geometry?.firstMaterial,
                let col = root.value(forKey: "roleColor") as? NSColor {
-                let a = 0.40 + 0.15 * sin(phaseT * 2.0 + Double(phase))
-                sm.emission.contents = col.withAlphaComponent(CGFloat(a))
+                if pulsing {
+                    let a = 0.40 + 0.15 * sin(phaseT * 2.0 + Double(phase))
+                    sm.emission.contents = col.withAlphaComponent(CGFloat(a))
+                } else if !isHuman {
+                    // Calm edge when idle / queued only
+                    sm.emission.contents = col.withAlphaComponent(0.06)
+                }
             }
         }
 
@@ -5188,6 +6191,12 @@ final class Agent3DMapView: NSView, SCNSceneRendererDelegate, NSGestureRecognize
 
     override func layout() {
         super.layout()
+        // Hint strip is cheap — always pin under toolbar
+        layoutHintStrip()
+        // Splitter/HUD must stay above SceneKit after every layout pass
+        if leftHUDScroll.superview === self {
+            raiseLeftHUDChrome()
+        }
         // During live resize, skip HUD reflow (cheap frames); full layout on end.
         if isLiveResizing || window?.inLiveResize == true { return }
         layoutRightHUD()

@@ -86,11 +86,11 @@ enum CronSchedule {
 
     static func load(session: String) -> [Job] {
         let db = Pong.loadJSON(path)
+        // Explicit empty array = user chose no cron (wizard / cleared). Never auto-seed.
         if let arr = db[session] as? [[String: Any]] {
-            let jobs = arr.compactMap { Job.from($0) }
-            if !jobs.isEmpty { return jobs }
+            return arr.compactMap { Job.from($0) }
         }
-        return defaultJobs(session: session)
+        return []
     }
 
     static func save(session: String, jobs: [Job]) {
@@ -100,7 +100,66 @@ enum CronSchedule {
         Pong.writeJSON(path, db)
     }
 
-    static func defaultJobs(session: String) -> [Job] {
+    /// Insert or replace by id (or by case-insensitive name when id empty).
+    @discardableResult
+    static func upsert(session: String, job: Job) -> Job {
+        var jobs = load(session: session)
+        var j = job
+        if j.id.isEmpty {
+            j.id = String(UUID().uuidString.prefix(8)).lowercased()
+        }
+        if let ix = jobs.firstIndex(where: { $0.id == j.id }) {
+            jobs[ix] = j
+        } else if let ix = jobs.firstIndex(where: { $0.name.lowercased() == j.name.lowercased() }) {
+            j.id = jobs[ix].id
+            jobs[ix] = j
+        } else {
+            jobs.append(j)
+        }
+        save(session: session, jobs: jobs)
+        Pong.log("CronSchedule.upsert session=\(session) id=\(j.id) name=\(j.name) owner=\(j.ownerId) cadence=\(j.cadence)")
+        return j
+    }
+
+    /// Parse human cadence into interval + phase. Accepts "every 15m", "every 1h", "daily 04:00".
+    static func parseCadence(_ raw: String) -> (label: String, intervalSec: TimeInterval, phaseSec: TimeInterval) {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = s.lowercased()
+        if lower.isEmpty {
+            return ("every 1h", 3600, 0)
+        }
+        if let re = try? NSRegularExpression(pattern: #"every\s+(\d+)\s*m"#, options: .caseInsensitive),
+           let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+           let r = Range(m.range(at: 1), in: s),
+           let n = Int(s[r]), n > 0 {
+            return ("every \(n)m", TimeInterval(n * 60), 0)
+        }
+        if let re = try? NSRegularExpression(pattern: #"every\s+(\d+)\s*h"#, options: .caseInsensitive),
+           let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+           let r = Range(m.range(at: 1), in: s),
+           let n = Int(s[r]), n > 0 {
+            return ("every \(n)h", TimeInterval(n * 3600), 0)
+        }
+        if lower.hasPrefix("daily") || lower.contains("daily") {
+            var phase: TimeInterval = 4 * 3600
+            if let re = try? NSRegularExpression(pattern: #"(\d{1,2}):(\d{2})"#, options: []),
+               let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+               let rh = Range(m.range(at: 1), in: s),
+               let rm = Range(m.range(at: 2), in: s),
+               let h = Int(s[rh]), let mi = Int(s[rm]) {
+                phase = TimeInterval(h * 3600 + mi * 60)
+            }
+            let label = s.isEmpty ? "daily 04:00" : s
+            return (label, 86400, phase)
+        }
+        if let n = Int(s), n > 0 {
+            return ("every \(n)m", TimeInterval(n * 60), 0)
+        }
+        return (s, 3600, 0)
+    }
+
+    /// Optional templates — only applied when the user opts in (wizard or Cron Manager).
+    static func suggestedJobs(session: String) -> [Job] {
         let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
         let condId = ((entry["conductor"] as? [String: Any])?["id"] as? String) ?? "c1"
         let workers = Workers.list(from: entry)
@@ -131,6 +190,34 @@ enum CronSchedule {
                 task: "Open your seat, confirm tool access, and reply READY with model + cwd. Do not start product work.",
                 cadence: "daily 04:00",
                 intervalSec: 86400, phaseSec: 4 * 3600, ownerId: w1, enabled: true),
+        ]
+    }
+
+    /// Back-compat alias for Cron Manager “restore suggestions”.
+    static func defaultJobs(session: String) -> [Job] { suggestedJobs(session: session) }
+
+    /// Templates for the install wizard before the team session exists.
+    /// `owners`: [(id, label)] e.g. c1 / w1… with display names.
+    static func wizardSuggestions(owners: [(id: String, label: String)]) -> [Job] {
+        let cond = owners.first?.id ?? "c1"
+        let w1 = owners.first(where: { $0.id.hasPrefix("w") })?.id ?? owners.dropFirst().first?.id ?? cond
+        let w2 = owners.dropFirst(2).first?.id ?? w1
+        return [
+            Job(id: "perimeter", name: "Perimeter sweep",
+                task: "Quick health check of open jobs, stuck seats, and route errors. Report anything that needs human or reassignment.",
+                cadence: "every 15m", intervalSec: 15 * 60, phaseSec: 0, ownerId: cond, enabled: true),
+            Job(id: "snapshot", name: "Snapshot",
+                task: "Summarize team state: open jobs, last verdicts, reject streak. Keep it to 5 bullets.",
+                cadence: "every 30m", intervalSec: 30 * 60, phaseSec: 120, ownerId: cond, enabled: true),
+            Job(id: "telemetry", name: "Telemetry sync",
+                task: "Pull latest control-plane events and note anomalies (failures, route refused, long runtime).",
+                cadence: "every 1h", intervalSec: 3600, phaseSec: 300, ownerId: w2, enabled: true),
+            Job(id: "audit", name: "Log audit",
+                task: "Review recent job claims for weak evidence or scope drift. Flag anything that should have been rejected.",
+                cadence: "every 6h", intervalSec: 6 * 3600, phaseSec: 600, ownerId: w1, enabled: true),
+            Job(id: "warmup", name: "Model warmup",
+                task: "Open your seat, confirm tool access, and reply READY with model + cwd. Do not start product work.",
+                cadence: "daily 04:00", intervalSec: 86400, phaseSec: 4 * 3600, ownerId: w1, enabled: true),
         ]
     }
 
@@ -224,14 +311,21 @@ final class CronManagerSheet: NSObject {
         scroll.documentView = listBox
         root.addSubview(scroll)
 
-        let add = NSButton(title: "+ Job", target: self, action: #selector(addJob))
+        let add = NSButton(title: "+ Describe in Guide", target: self, action: #selector(addJob))
         add.bezelStyle = .rounded
-        add.frame = NSRect(x: 16, y: 16, width: 80, height: 28)
+        add.toolTip = "Create a schedule by chatting with Guide (recommended)"
+        add.frame = NSRect(x: 16, y: 16, width: 140, height: 28)
         root.addSubview(add)
 
-        let defaults = NSButton(title: "Restore defaults", target: self, action: #selector(restoreDefaults))
+        let manual = NSButton(title: "Manual form", target: self, action: #selector(addJobManual))
+        manual.bezelStyle = .rounded
+        manual.toolTip = "Classic multi-field form"
+        manual.frame = NSRect(x: 164, y: 16, width: 100, height: 28)
+        root.addSubview(manual)
+
+        let defaults = NSButton(title: "Suggested", target: self, action: #selector(restoreDefaults))
         defaults.bezelStyle = .rounded
-        defaults.frame = NSRect(x: 104, y: 16, width: 130, height: 28)
+        defaults.frame = NSRect(x: 272, y: 16, width: 90, height: 28)
         root.addSubview(defaults)
 
         let done = NSButton(title: "Done", target: self, action: #selector(donePressed))
@@ -325,19 +419,31 @@ final class CronManagerSheet: NSObject {
         }
     }
 
+    /// Primary path: Guide chat to describe the schedule (not the multi-field alert).
     @objc private func addJob() {
-        let owners = seats.map { $0.id }
-        let owner = owners.first ?? "c1"
+        let sess = session
+        window?.orderOut(nil)
+        AppAIChatBubble.shared.beginCronWizard(session: sess.isEmpty ? nil : sess)
+        onDone?()
+    }
+
+    /// Power-user fallback: classic form.
+    @objc private func addJobManual() {
+        let owner = seats.first?.id ?? "c1"
         appendAndEdit(ownerId: owner)
     }
 
-    /// From map `+` menu: open manager with a new job owned by this seat.
+    /// From map `+` menu: chat-first for this seat; manual still available in manager.
     func addJobForOwner(session: String, ownerId: String, seats: [Seat3D], onDone: @escaping () -> Void) {
-        show(session: session, seats: seats, onDone: onDone)
-        // Defer so the sheet is on-screen before the edit alert.
-        DispatchQueue.main.async { [weak self] in
-            self?.appendAndEdit(ownerId: ownerId)
-        }
+        self.session = session
+        self.seats = seats.filter { $0.role != "human" }
+        self.onDone = onDone
+        AppAIChatBubble.shared.beginCronWizard(
+            session: session,
+            ownerHint: ownerId,
+            seatLabels: seats.map { "\($0.id)=\($0.title)" }
+        )
+        onDone()
     }
 
     private func appendAndEdit(ownerId: String) {

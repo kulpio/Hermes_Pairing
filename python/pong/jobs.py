@@ -82,17 +82,140 @@ def open_jobs(session: str) -> list[dict[str, Any]]:
     ]
 
 
+# --- Activity age (align Mission STUCK / RUNTIME thresholds) ---
+# notified/queued soft-activity: 20 minutes; running: 45 minutes.
+# Auto-cancel abandoned notified/queued after 2 hours; running after 24 hours.
+ACTIVITY_NOTIFIED_QUEUED_MAX_AGE = 20 * 60
+ACTIVITY_RUNNING_MAX_AGE = 45 * 60
+STALE_NOTIFIED_CANCEL_AGE = 2 * 3600
+STALE_RUNNING_CANCEL_AGE = 24 * 3600
+
+
+def job_age_seconds(job: dict[str, Any], *, now: float | None = None) -> float:
+    """Age from updated_at, then created_at. Missing timestamps → 0 (treat as fresh)."""
+    now_t = time.time() if now is None else now
+    raw = job.get("updated_at")
+    if raw is None:
+        raw = job.get("created_at")
+    try:
+        ts = float(raw or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    if ts <= 0:
+        return 0.0
+    return max(0.0, now_t - ts)
+
+
+def is_activity_fresh(job: dict[str, Any], *, now: float | None = None) -> bool:
+    """Whether a non-terminal job still counts toward map seat activity."""
+    st = str(job.get("status") or "").lower()
+    age = job_age_seconds(job, now=now)
+    if st == "human_takeover" or job.get("human_takeover"):
+        return True
+    if st in ("notified", "queued"):
+        return age <= ACTIVITY_NOTIFIED_QUEUED_MAX_AGE
+    if st == "running" or "working" in st:
+        return age <= ACTIVITY_RUNNING_MAX_AGE
+    # Other non-terminal: include while under notified threshold
+    return age <= ACTIVITY_NOTIFIED_QUEUED_MAX_AGE
+
+
+def activity_open_jobs(session: str, *, now: float | None = None) -> list[dict[str, Any]]:
+    """Open jobs fresh enough to drive status_hint / map ACTIVE pulse."""
+    now_t = time.time() if now is None else now
+    return [j for j in open_jobs(session) if is_activity_fresh(j, now=now_t)]
+
+
+def cancel_stale_abandoned_jobs(
+    session: str, *, now: float | None = None
+) -> list[str]:
+    """
+    Durable hygiene: auto-cancel abandoned jobs.
+    - notified / queued age > 2h → cancelled (cancel_reason=stale_notified)
+    - running age > 24h → cancelled (cancel_reason=stale_running)
+    Returns cancelled job ids.
+    """
+    now_t = time.time() if now is None else now
+    cancelled: list[str] = []
+    for j in list(open_jobs(session)):
+        jid = str(j.get("id") or "")
+        if not jid:
+            continue
+        st = str(j.get("status") or "").lower()
+        age = job_age_seconds(j, now=now_t)
+        reason: str | None = None
+        if st in ("notified", "queued") and age > STALE_NOTIFIED_CANCEL_AGE:
+            reason = "stale_notified"
+        elif st == "running" and age > STALE_RUNNING_CANCEL_AGE:
+            reason = "stale_running"
+        if not reason:
+            continue
+        try:
+            set_status(
+                session,
+                jid,
+                "cancelled",
+                skip_snapshot=True,
+                cancel_reason=reason,
+                error=f"auto-cancelled: {reason}",
+            )
+            cancelled.append(jid)
+        except Exception:
+            # Best-effort hygiene; never break snapshot
+            pass
+    return cancelled
+
+
 def build_task_prompt(job: dict[str, Any], state: dict[str, Any]) -> str:
     """Full text a worker would see (TUI paste or headless)."""
     parts: list[str] = []
+    worker_id = str(job.get("worker") or "")
+
     ctx = format_team_context(state)
     if ctx:
         parts.append(ctx.rstrip())
     perms = format_permissions_block(state)
     if perms:
         parts.append(perms.rstrip())
+
+    # Durable role + who-is-who (so humans need not re-brief each boot)
+    if not job.get("no_identity"):
+        try:
+            from .role_identity import format_seat_identity
+
+            ident = format_seat_identity(state, worker_id)
+            if ident.strip():
+                parts.append(ident.rstrip())
+        except Exception:
+            pass
+
+    # Architecture road + hop recap (hard guardrails, not suggestions)
+    if not job.get("no_recap"):
+        try:
+            from .role_identity import format_architecture_guardrails
+
+            road = format_architecture_guardrails(state, worker_id)
+            if road.strip():
+                parts.append(road.rstrip())
+        except Exception:
+            try:
+                from .handoff_recap import architecture_recap_for_seat
+
+                recap = architecture_recap_for_seat(state, worker_id)
+                if recap.strip():
+                    parts.append(recap.rstrip())
+            except Exception:
+                pass
+
     parts.append(f"## JOB `{job['id']}`")
     parts.append(f"- worker: {job.get('worker')}")
+    try:
+        from .role_identity import role_meta, seat_mission_role
+
+        mr = seat_mission_role(state, worker_id)
+        parts.append(f"- mission_role: {role_meta(mr)['title']} ({mr})")
+    except Exception:
+        pass
     parts.append(f"- round: {job.get('round', 1)}")
     if job.get("project_root"):
         parts.append(f"- project_root: {job['project_root']}")
@@ -119,6 +242,18 @@ def build_task_prompt(job: dict[str, Any], state: dict[str, Any]) -> str:
             "commands: <what you ran>\n"
             "summary: <one short paragraph>\n```"
         )
+        try:
+            from .flow import claim_notify_targets
+
+            targets = claim_notify_targets(state, worker_id)
+            if targets:
+                joined = ", ".join(targets)
+                parts.append(
+                    f"Architecture claim path: ** Send claim to {joined} ** "
+                    f"(also run `pong job claim` so the control plane records it)."
+                )
+        except Exception:
+            pass
     else:
         parts.append(
             f"When completely done, print exactly {marker} on its own line, "
@@ -143,6 +278,7 @@ def create_job(
     round_n: int = 1,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from .flow import assert_assign_allowed
     from .routing import resolve_write_session, write_session_last
 
     # V1/V2: never fall back to active-pair; require session token for cross-team
@@ -154,6 +290,11 @@ def create_job(
     if not (task or "").strip():
         raise ValueError("empty task")
     worker = resolve_worker(state, worker_key)
+    # Architecture edges are enforced when flow_graph is non-empty (UI topology).
+    from_seat = None
+    if extra and extra.get("from_seat"):
+        from_seat = str(extra.get("from_seat"))
+    assert_assign_allowed(state, str(worker.get("id") or ""), from_seat=from_seat)
     jid = new_job_id()
     now = time.time()
     job: dict[str, Any] = {
@@ -215,7 +356,14 @@ def _clear_ephemeral_for_job(session: str, job_id: str) -> None:
         pass
 
 
-def set_status(session: str, job_id: str, status: str, **fields: Any) -> dict[str, Any]:
+def set_status(
+    session: str,
+    job_id: str,
+    status: str,
+    *,
+    skip_snapshot: bool = False,
+    **fields: Any,
+) -> dict[str, Any]:
     from .routing import resolve_write_session
 
     sess = resolve_write_session(session)
@@ -245,6 +393,15 @@ def set_status(session: str, job_id: str, status: str, **fields: Any) -> dict[st
     save_job(job)
     if status in TERMINAL_STATUSES:
         _clear_ephemeral_for_job(sess, job_id)
+        # Push UI snapshot so map seats calm without waiting for the next panel poll.
+        # skip_snapshot=True when hygiene runs inside team_snapshot (avoids re-entry).
+        if not skip_snapshot:
+            try:
+                from .snapshot import write_snapshot
+
+                write_snapshot(session=sess)
+            except Exception:
+                pass
     events.emit(
         "job.status",
         session=sess,
@@ -331,6 +488,22 @@ def record_claim(
     # V6: per-session last-* only — no global root mirrors
     write_session_last(job_sess, "last-reply", text)
     write_session_last(job_sess, "last-claude", text)
+    # Push claim recap along architecture claim edges (usually → orchestrator TUI)
+    try:
+        from .flow import notify_claim
+        from .state import load_session_state as _lss
+
+        st = _lss(job_sess) or {"session": job_sess}
+        st.setdefault("session", job_sess)
+        notify_claim(st, job, claim)
+    except Exception:
+        pass
+    try:
+        from .snapshot import write_snapshot
+
+        write_snapshot(session=job_sess)
+    except Exception:
+        pass
     return job
 
 
@@ -350,9 +523,11 @@ def pending_for_worker(session: str, worker_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def summarize_jobs(session: str, *, recent_n: int = 10) -> dict[str, Any]:
+def summarize_jobs(session: str, *, recent_n: int = 10, now: float | None = None) -> dict[str, Any]:
     all_j = list_jobs(session)
     open_j = [j for j in all_j if j.get("status") not in TERMINAL_STATUSES]
+    now_t = time.time() if now is None else now
+    activity_j = [j for j in open_j if is_activity_fresh(j, now=now_t)]
     recent = [j for j in all_j if j.get("status") in TERMINAL_STATUSES][:recent_n]
     # Per-status tallies for Mission “Jobs by status” (design handoff)
     by_status: dict[str, int] = {}
@@ -360,10 +535,14 @@ def summarize_jobs(session: str, *, recent_n: int = 10) -> dict[str, Any]:
         st = str(j.get("status") or "unknown")
         by_status[st] = by_status.get(st, 0) + 1
     return {
+        # Full open list (Mission STUCK/RUNTIME watchlist)
         "open": [job_summary(j) for j in open_j],
+        # Age-filtered open jobs for map seat pulse / ACTIVE chrome
+        "activity_open": [job_summary(j) for j in activity_j],
         "recent": [job_summary(j) for j in recent],
         "counts": {
             "open": len(open_j),
+            "activity_open": len(activity_j),
             "total": len(all_j),
             "done": sum(1 for j in all_j if j.get("status") == "done"),
             "failed": sum(1 for j in all_j if j.get("status") == "failed"),

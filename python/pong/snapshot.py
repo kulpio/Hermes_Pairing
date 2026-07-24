@@ -8,7 +8,12 @@ from typing import Any
 
 from . import events
 from . import ledger as ledger_mod
-from .jobs import open_jobs, summarize_jobs
+from .jobs import (
+    activity_open_jobs,
+    cancel_stale_abandoned_jobs,
+    open_jobs,
+    summarize_jobs,
+)
 from .jsonutil import write_json
 from .paths import binds_dir, sessions_dir, state_dir
 from .schema import CONTRACT_VERSION, SCHEMA_VERSION
@@ -24,25 +29,41 @@ from .state import (
 
 
 def _worker_status_hint(session: str, worker_id: str) -> tuple[str, int]:
+    """Map status for UI: running/notified → in-flight; queued → busy; none → idle.
+
+    Only age-fresh open jobs count (stale notified/queued/running do not pulse seats).
+    """
+    act = activity_open_jobs(session)
     open_j = [
         j
-        for j in open_jobs(session)
+        for j in act
         if j.get("worker") == worker_id and not j.get("human_takeover")
     ]
     takeover = [
         j
-        for j in open_jobs(session)
+        for j in act
         if j.get("worker") == worker_id and j.get("status") == "human_takeover"
     ]
     if takeover:
         return "human_takeover", len(open_j) + len(takeover)
-    if open_j:
-        return "busy", len(open_j)
-    return "idle", 0
+    if not open_j:
+        return "idle", 0
+    # Prefer real in-flight over soft "busy" so map seats calm when only queued
+    for j in open_j:
+        st = str(j.get("status") or "").lower()
+        if st in ("running", "notified") or "working" in st:
+            return "running", len(open_j)
+    return "busy", len(open_j)
 
 
 def team_snapshot(session: str, entry: dict[str, Any] | None = None) -> dict[str, Any]:
     from .subagents import collect_ephemeral_subs
+
+    # Hygiene first: auto-cancel abandoned notified/queued (>2h) / running (>24h)
+    try:
+        cancel_stale_abandoned_jobs(session)
+    except Exception:
+        pass
 
     state = load_session_state(session)
     if not state and entry:
@@ -79,7 +100,8 @@ def team_snapshot(session: str, entry: dict[str, Any] | None = None) -> dict[str
             }
         )
     jobs = summarize_jobs(session)
-    open_list = open_jobs(session)
+    # Ephemeral seats track activity-fresh jobs so stale notified does not pin them
+    open_list = activity_open_jobs(session)
     eph_subs = collect_ephemeral_subs(
         session,
         permanent_ids=permanent_ids,

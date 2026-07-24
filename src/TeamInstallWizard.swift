@@ -128,6 +128,8 @@ struct TeamWizardPlan {
     var pingOnDone: Bool = true
     /// Orchestrator focuses on goal / routing only (doesn't implement)
     var orchGoalOnly: Bool = true
+    /// Cron jobs chosen in wizard (empty = no schedule; never auto-seeded)
+    var cronJobs: [CronSchedule.Job] = []
 
     struct WizardWorker {
         var type: WorkerType
@@ -320,7 +322,9 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var content: NSView!
     private var step = 0
-    private let steps = ["Welcome", "Mission", "Names", "Architecture", "Roles", "Policy", "Review"]
+    // Architecture is the one place to name agents, set purpose, and draw links.
+    // Roles is a short confirm (no re-entering names).
+    private let steps = ["Welcome", "Mission", "Names", "Architecture", "Confirm roles", "Policy", "Cron", "Review"]
 
     private var plan: TeamWizardPlan!
     private var onFinish: ((TeamWizardPlan) -> Void)?
@@ -342,6 +346,10 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
     private var decisionPop: NSPopUpButton!
     private var pingOnDoneCheck: NSButton!
     private var orchGoalOnlyCheck: NSButton!
+    /// Cron wizard: suggestion checkbox + owner popup (parallel arrays)
+    private var cronEnableChecks: [NSButton] = []
+    private var cronOwnerPops: [NSPopUpButton] = []
+    private var cronSuggestionTemplates: [CronSchedule.Job] = []
 
     private let W: CGFloat = 640
     private let H: CGFloat = 580
@@ -369,9 +377,13 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
             },
             permissions: PairState.defaultPermissions(),
             writeScaffold: true,
-            installGlobalSkills: true
+            installGlobalSkills: true,
+            cronJobs: []
         )
         step = 0
+        cronEnableChecks = []
+        cronOwnerPops = []
+        cronSuggestionTemplates = []
         buildWindow()
         showStep()
         NSApp.activate(ignoringOtherApps: true)
@@ -432,6 +444,7 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
         case 3: pageArchitecture()
         case 4: pageRoles()
         case 5: pagePolicy()
+        case 6: pageCron()
         default: pageReview()
         }
 
@@ -575,17 +588,19 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
 
     private func pageArchitecture() {
         let intro = wrap(
-            "Drag seats · + / Link: source then destination (existing) · drag dotted ends to rewire · × or Delete removes agents · mid-arrow sets kind · drag into SUB to nest.",
-            frame: NSRect(x: 28, y: H - 118, width: W - 200, height: 36)
+            "Click an agent to rename it and pick what they do (Coder, Reviewer…).\n"
+                + "Link: boss gives work → agent · agent sends result back. Drag middle of a line to bend it.\n"
+                + "+ adds agents · × removes · Helpers sit under agents.",
+            frame: NSRect(x: 28, y: H - 128, width: W - 200, height: 52)
         )
         content.addSubview(intro)
 
-        let linkBtn = pill("Link seats…", #selector(toggleArchLinkMode))
-        linkBtn.frame = NSRect(x: W - 150, y: H - 112, width: 120, height: 28)
-        linkBtn.toolTip = "Click source, then destination seat — does not create a new agent"
+        let linkBtn = pill("Link…", #selector(toggleArchLinkMode))
+        linkBtn.frame = NSRect(x: W - 130, y: H - 118, width: 100, height: 28)
+        linkBtn.toolTip = "Click source seat, then destination — or use Save + Link on an agent"
         content.addSubview(linkBtn)
 
-        let canvas = TeamArchCanvas(frame: NSRect(x: 28, y: 70, width: W - 56, height: H - 200))
+        let canvas = TeamArchCanvas(frame: NSRect(x: 28, y: 70, width: W - 56, height: H - 210))
         canvas.defaultModelId = plan.workers.first?.type.id ?? "claude"
         canvas.load(plan: plan)
         canvas.onChanged = { [weak self] in
@@ -620,15 +635,20 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
     }
 
     private func pageRoles() {
+        // Roles come from Architecture (click agent → purpose). This page only confirms.
+        if let canvas = archCanvas {
+            syncPlanFromCanvas(canvas)
+        }
         var y = H - 120
         let intro = wrap(
-            "Who does what? Orchestrator plans and verifies. Pick Coder, Reviewer, Operator, Researcher, or Task runner (cron / one-shot jobs).",
-            frame: NSRect(x: 28, y: y - 40, width: W - 56, height: 40)
+            "Quick check — you already set these on Architecture by clicking each agent.\n"
+                + "Change anything here if needed, or go Back to the map.",
+            frame: NSRect(x: 28, y: y - 44, width: W - 56, height: 44)
         )
         content.addSubview(intro)
-        y -= 60
+        y -= 64
 
-        let orch = NSTextField(labelWithString: "c1  \(plan.conductorLabel)  →  Orchestrator (fixed)")
+        let orch = NSTextField(labelWithString: "Boss  \(plan.conductorLabel)  →  plans & gives work (fixed)")
         orch.font = PongTheme.font(12, weight: .medium)
         orch.textColor = PongTheme.blue
         orch.frame = NSRect(x: 28, y: y, width: W - 56, height: 20)
@@ -637,13 +657,13 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
 
         rolePopups = []
         for (i, w) in plan.workers.enumerated() {
-            let row = NSTextField(labelWithString: "w\(i + 1)  \(w.label)")
-            row.font = PongTheme.font(12)
+            let row = NSTextField(labelWithString: "\(w.label.isEmpty ? "Agent \(i + 1)" : w.label)")
+            row.font = PongTheme.font(12, weight: .medium)
             row.textColor = PongTheme.textPrimary
-            row.frame = NSRect(x: 28, y: y, width: 200, height: 22)
+            row.frame = NSRect(x: 28, y: y, width: 180, height: 22)
             content.addSubview(row)
 
-            let pop = NSPopUpButton(frame: NSRect(x: 240, y: y - 2, width: 200, height: 26), pullsDown: false)
+            let pop = NSPopUpButton(frame: NSRect(x: 220, y: y - 2, width: 220, height: 26), pullsDown: false)
             for r in MissionRole.allCases where r != .orchestrator {
                 pop.addItem(withTitle: r.title)
                 pop.lastItem?.representedObject = r.rawValue
@@ -694,6 +714,72 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
         content.addSubview(bullets)
     }
 
+    /// Optional cron: off by default. User opts into suggested jobs + owner seat.
+    private func pageCron() {
+        harvest()
+        cronEnableChecks = []
+        cronOwnerPops = []
+
+        let owners: [(id: String, label: String)] = {
+            var o: [(String, String)] = [("c1", plan.conductorLabel.isEmpty ? "Orchestrator" : plan.conductorLabel)]
+            for (i, w) in plan.workers.enumerated() {
+                o.append(("w\(i + 1)", w.label.isEmpty ? "Agent \(i + 1)" : w.label))
+            }
+            return o
+        }()
+        cronSuggestionTemplates = CronSchedule.wizardSuggestions(owners: owners)
+
+        var y = H - 118
+        content.addSubview(label("Cron jobs (optional)", x: 28, y: y))
+        y -= 28
+        let intro = wrap(
+            "New teams start with no schedule. Turn on only the ticks you want — " +
+            "each job is delivered to the owner agent when it fires. " +
+            "You can add or edit more later from the map Cron panel.",
+            frame: NSRect(x: 28, y: y - 52, width: W - 56, height: 52)
+        )
+        content.addSubview(intro)
+        y -= 64
+
+        let none = wrap(
+            "Leave all unchecked for a clean launch (recommended unless you need scheduled work).",
+            frame: NSRect(x: 28, y: y - 28, width: W - 56, height: 28)
+        )
+        none.textColor = PongTheme.textTertiary
+        content.addSubview(none)
+        y -= 36
+
+        let rowH: CGFloat = 36
+        for (i, job) in cronSuggestionTemplates.enumerated() {
+            let rowY = y - CGFloat(i) * rowH - 28
+            let on = plan.cronJobs.contains { $0.id == job.id }
+            let check = NSButton(
+                checkboxWithTitle: "\(job.name)  ·  \(job.cadence)",
+                target: nil, action: nil)
+            check.state = on ? .on : .off
+            check.font = PongTheme.font(12)
+            check.frame = NSRect(x: 28, y: rowY, width: W - 200, height: 22)
+            check.toolTip = job.task
+            content.addSubview(check)
+            cronEnableChecks.append(check)
+
+            let pop = NSPopUpButton(frame: NSRect(x: W - 168, y: rowY - 2, width: 140, height: 24), pullsDown: false)
+            pop.font = PongTheme.labelFont(11)
+            for o in owners {
+                pop.addItem(withTitle: o.label)
+                pop.lastItem?.representedObject = o.id
+            }
+            if let idx = owners.firstIndex(where: { $0.id == job.ownerId }) {
+                pop.selectItem(at: idx)
+            } else if let prev = plan.cronJobs.first(where: { $0.id == job.id }),
+                      let idx = owners.firstIndex(where: { $0.id == prev.ownerId }) {
+                pop.selectItem(at: idx)
+            }
+            content.addSubview(pop)
+            cronOwnerPops.append(pop)
+        }
+    }
+
     private func pageReview() {
         harvest()
         // Auto-compose brief from mission choices — user rarely needs free-form prose
@@ -720,6 +806,11 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
         content.addSubview(installSkillsCheck)
         y -= 40
 
+        let cronLine: String = {
+            if plan.cronJobs.isEmpty { return "Cron: none (no schedule)" }
+            let bits = plan.cronJobs.map { "\($0.name)→\($0.ownerId)" }
+            return "Cron: \(bits.joined(separator: ", "))"
+        }()
         let lines = [
             "Team: \(plan.teamName.isEmpty ? "(unnamed)" : plan.teamName)",
             "Mission: \(plan.missionGoal.isEmpty ? "(default)" : plan.missionGoal)",
@@ -730,6 +821,7 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
             let sub = w.parentId.map { " under \($0)" } ?? ""
             return "w\(i + 1): \(w.label) · \(w.type.id) · \(w.role.title)\(sub)"
         } + [
+            cronLine,
             "",
             "Brief (auto):",
             plan.teamBrief,
@@ -768,9 +860,10 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
     }
 
     @objc private func skipPressed() {
-        // Minimal plan — types only, no scaffold
+        // Minimal plan — types only, no scaffold, no cron
         plan.writeScaffold = false
         plan.installGlobalSkills = false
+        plan.cronJobs = []
         finish()
     }
 
@@ -834,6 +927,21 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
         }
         if writeScaffoldCheck != nil { plan.writeScaffold = writeScaffoldCheck.state == .on }
         if installSkillsCheck != nil { plan.installGlobalSkills = installSkillsCheck.state == .on }
+        // Cron page: only checked suggestions become real jobs (default = none)
+        if !cronEnableChecks.isEmpty, cronEnableChecks.count == cronSuggestionTemplates.count {
+            var picked: [CronSchedule.Job] = []
+            for (i, check) in cronEnableChecks.enumerated() where check.state == .on {
+                var j = cronSuggestionTemplates[i]
+                if i < cronOwnerPops.count,
+                   let oid = cronOwnerPops[i].selectedItem?.representedObject as? String,
+                   !oid.isEmpty {
+                    j.ownerId = oid
+                }
+                j.enabled = true
+                picked.append(j)
+            }
+            plan.cronJobs = picked
+        }
         // teamBrief always from composedBrief() above — no free-text override
     }
 
@@ -1005,9 +1113,18 @@ enum TeamWizardApply {
         if plan.writeScaffold {
             TeamScaffold.write(plan: plan, session: session)
         }
+        // Persist cron choice (including empty) so load() never invents defaults
+        CronSchedule.save(session: session, jobs: plan.cronJobs)
         // Names land after Terminals open — repaint titles to Team · Agent (not pong-team · Grok Build)
         usleep(200_000)
         TerminalTheme.applyPair(session)
-        Pong.log("wizard applied session=\(session) scaffold=\(plan.writeScaffold) edges=\(plan.flowEdges.count)")
+        // Drop any orphan edges/positions left from a prior design on this session id.
+        TeamSanitizer.reconcile(pair: session)
+        // Conductor kickoff with wizard display name + roster (supersedes startFresh schedule).
+        ConductorKickoff.scheduleInject(
+            session: session,
+            context: ConductorKickoff.contextFromPlan(plan, session: session)
+        )
+        Pong.log("wizard applied session=\(session) scaffold=\(plan.writeScaffold) edges=\(plan.flowEdges.count) cron=\(plan.cronJobs.count)")
     }
 }

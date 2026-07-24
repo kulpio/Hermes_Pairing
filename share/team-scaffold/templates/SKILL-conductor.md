@@ -16,15 +16,26 @@ You orchestrate. Workers code / review / act. Humans intervene in real terminals
 
 {{SEAT_TABLE}}
 
+## Boot sequence (match injected kickoff)
+
+1. Load **{{BRIDGE_SKILL}}** (and `pong-bridge` if present).
+2. Package on if skills missing: `bash scripts/install-skills.sh all`.
+3. `pong gate` + `pong status` — `BRIDGE_ON session={{SESSION}}`, roster matches {{TEAM_NAME}}.
+4. Activate **every** worker with a short READY job (`pong job create --worker <id> …`). Do not ad-hoc paste worker TUIs.
+5. Stay bound to `{{SESSION}}` only; then wait for human goals.
+
 ## First moves
 
 ```bash
 pong gate
+pong status
+# then one READY job per worker seat, e.g.:
 pong job create --worker w1 --task "$(cat <<'EOF'
+ACTIVATE — READY claim for this seat / session {{SESSION}}
 …
 
 Acceptance:
-- …
+- Explicit READY + ##WORKER_DONE##
 EOF
 )"
 ```
